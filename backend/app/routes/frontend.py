@@ -2,6 +2,7 @@ import httpx
 from fastapi import APIRouter, Request
 from fastapi.responses import FileResponse, JSONResponse, Response
 
+from app.core.response import api_error_response, api_type_from_path
 from app.services.frontend import FRONTEND_DIST_DIR, frontend_dev_url, is_development
 
 router = APIRouter()
@@ -14,6 +15,13 @@ _RESERVED_PATHS = {"health", "ready", "docs", "redoc", "openapi.json"}
 async def _serve_frontend(path: str, request: Request):
     first_segment = path.split("/", 1)[0]
     if first_segment in _RESERVED_PREFIXES or path in _RESERVED_PATHS:
+        if first_segment == "v1":
+            return api_error_response(
+                status_code=404,
+                message="Not Found",
+                api_type=api_type_from_path(f"/{path}"),
+                code="404",
+            )
         return JSONResponse(status_code=404, content={"detail": "Not Found"})
 
     if is_development():

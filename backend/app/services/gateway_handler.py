@@ -7,6 +7,7 @@ from fastapi import Request, HTTPException, BackgroundTasks
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from app.core.config import settings
+from app.core.response import api_error_body, api_error_response, api_error_type, extract_error_message
 from app.core.http_debug import log_upstream_request, log_upstream_response
 from app.core.logging import get_logger
 from app.middleware.request_id import get_trace_id
@@ -42,6 +43,14 @@ class NoRetryError(Exception):
         self.status_code = status_code
         self.error_body = error_body
         super().__init__(json.dumps(error_body))
+
+
+class UpstreamAPIError(Exception):
+
+    def __init__(self, status_code: int, error_body: dict):
+        self.status_code = status_code
+        self.error_body = error_body
+        super().__init__(extract_error_message(error_body))
 
 def _safe_int(value: Any) -> int:
     try:
@@ -362,24 +371,35 @@ def _apply_claude_default_mode_override(provider_request: dict[str, Any], model_
         provider_request.pop("output_config", None)
 
 def create_error_response(status_code: int, message: str, api_type: str) -> JSONResponse:
-    if api_type == "claude":
-        error_body = {
-            "type": "error",
-            "error": {
-                "type": "api_error",
-                "message": message,
-            },
-        }
-    else:
-        error_body = {
-            "error": {
-                "message": message,
-                "type": "api_error",
-                "code": str(status_code),
-            }
-        }
+    return api_error_response(
+        status_code=status_code,
+        message=message,
+        api_type=api_type,
+        code=str(status_code) if api_type != "claude" else None,
+        request_id=get_trace_id(),
+    )
 
-    return JSONResponse(content=error_body, status_code=status_code)
+def create_error_body(
+    status_code: int,
+    message: str,
+    api_type: str,
+    detail: Any = None,
+) -> dict[str, Any]:
+    return api_error_body(
+        status_code=status_code,
+        message=message,
+        api_type=api_type,
+        error_type=api_error_type(status_code, api_type, detail),
+        code=str(status_code) if api_type != "claude" else None,
+        request_id=get_trace_id(),
+    )
+
+def stream_error_event(status_code: int, message: str, api_type: str, detail: Any = None) -> str:
+    body = create_error_body(status_code, message, api_type, detail)
+    payload = json.dumps(body, ensure_ascii=False)
+    if api_type == "claude":
+        return f"event: error\ndata: {payload}\n\n"
+    return f"data: {payload}\n\n"
 
 async def handle_gateway_request(
     request: Request,
@@ -602,7 +622,7 @@ async def handle_gateway_request(
                 background_tasks,
                 _request_log_context(
                     trace_id, api_key_hash, api_type, model_name, start_time,
-                    e.status_code, str(e),
+                    e.status_code, extract_error_message(e.error_body),
                     channel_id=channel.channel_id or "inline",
                     channel_name=channel.name,
                     thinking_effort=thinking_effort,
@@ -663,9 +683,6 @@ async def try_channel(
 
     status_code = resp.status_code
 
-    if status_code >= 500:
-        raise HTTPException(status_code=status_code, detail=resp.text[:500])
-
     if status_code >= 400:
         error_body = {}
         try:
@@ -673,10 +690,15 @@ async def try_channel(
         except Exception:
             error_body = {"error": {"message": resp.text[:500]}}
 
-        mapped_error = adapter.convert_error(status_code, error_body, api_type)
+        mapped_error = create_error_body(
+            status_code,
+            extract_error_message(error_body),
+            api_type,
+            error_body,
+        )
         if status_code == 400:
             raise NoRetryError(status_code=status_code, error_body=mapped_error)
-        raise HTTPException(status_code=status_code, detail=json.dumps(mapped_error))
+        raise UpstreamAPIError(status_code=status_code, error_body=mapped_error)
 
     response_body = resp.json()
 
@@ -777,7 +799,7 @@ async def stream_gateway_request(
             status_code=500,
             error_message="pre_route hook returned invalid request body",
         )
-        yield f"data: {json.dumps({'error': {'message': 'pre_route hook returned invalid request body', 'type': 'api_error'}})}\n\n"
+        yield stream_error_event(500, "pre_route hook returned invalid request body", api_type)
         yield stream_done_marker(api_type)
         return
     model_name = request_body.get("model", model_name)
@@ -815,7 +837,7 @@ async def stream_gateway_request(
             status_code=503,
             error_message=last_error,
         )
-        yield f"data: {json.dumps({'error': {'message': last_error, 'type': 'api_error'}})}\n\n"
+        yield stream_error_event(503, last_error, api_type)
         yield stream_done_marker(api_type)
         return
 
@@ -855,7 +877,7 @@ async def stream_gateway_request(
                                 channel_name=channel.name,
                                 upstream_url=url,
                             )
-                            yield f"data: {json.dumps({'error': {'message': error_message, 'type': 'api_error'}})}\n\n"
+                            yield stream_error_event(400, error_message, api_type)
                             yield stream_done_marker(api_type)
                             return
                         if channel.channel_id:
@@ -920,10 +942,7 @@ async def stream_gateway_request(
                     channel_name=channel.name,
                     **last_token_usage,
                 )
-                if api_type in ("openai", "responses"):
-                    yield f"data: {json.dumps({'error': {'message': f'Stream interrupted: {last_error}', 'type': 'api_error'}})}\n\n"
-                else:
-                    yield f"event: error\ndata: {json.dumps({'type': 'error', 'error': {'message': f'Stream interrupted: {last_error}'}})}\n\n"
+                yield stream_error_event(last_status_code, f"Stream interrupted: {last_error}", api_type)
                 yield stream_done_marker(api_type)
                 return
 
@@ -936,10 +955,7 @@ async def stream_gateway_request(
                     channel_id=channel.channel_id or "inline",
                     channel_name=channel.name,
                 )
-                if api_type in ("openai", "responses"):
-                    yield f"data: {json.dumps({'error': {'message': last_error, 'type': 'api_error'}})}\n\n"
-                else:
-                    yield f"event: error\ndata: {json.dumps({'type': 'error', 'error': {'message': last_error}})}\n\n"
+                yield stream_error_event(400, last_error, api_type)
                 yield stream_done_marker(api_type)
                 return
 
@@ -956,8 +972,8 @@ async def stream_gateway_request(
         **last_token_usage,
     )
     if api_type in ("openai", "responses"):
-        yield f"data: {json.dumps({'error': {'message': last_error, 'type': 'api_error'}})}\n\n"
+        yield stream_error_event(last_status_code, last_error, api_type)
         yield stream_done_marker(api_type)
     else:
-        yield f"event: error\ndata: {json.dumps({'type': 'error', 'error': {'message': last_error}})}\n\n"
+        yield stream_error_event(last_status_code, last_error, api_type)
         yield stream_done_marker(api_type)
