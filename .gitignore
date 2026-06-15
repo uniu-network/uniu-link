@@ -68,6 +68,5 @@ Thumbs.db
 logs
 test.py
 
-docker-compose.yml
 config.yaml
 opencode.json

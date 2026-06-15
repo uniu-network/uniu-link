@@ -1,0 +1,66 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: uniulink-postgres
+    environment:
+      POSTGRES_DB: uniulink
+      POSTGRES_USER: uniulink
+      POSTGRES_PASSWORD: uniulink-secret-password
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U uniulink"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    networks:
+      - uniulink-net
+
+  redis:
+    image: redis:7-alpine
+    container_name: uniulink-redis
+    command: redis-server --appendonly yes
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    networks:
+      - uniulink-net
+
+  uniulink:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: ghcr.io/uniu-network/uniu-link:latest
+    container_name: uniulink
+    environment:
+      POSTGRES_HOST: postgres
+      REDIS_URL: redis://redis:6379/0
+    ports:
+      - "8000:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    volumes:
+      - ./config.yaml:/config.yaml:ro
+      - ./backend/plugins:/app/plugins:ro
+    restart: unless-stopped
+    networks:
+      - uniulink-net
+
+volumes:
+  postgres_data:
+  redis_data:
+
+networks:
+  uniulink-net:
+    driver: bridge
