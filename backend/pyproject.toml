@@ -1,0 +1,7 @@
+[tool.pyright]
+include = ["app"]
+exclude = ["alembic", "../frontend/node_modules"]
+pythonVersion = "3.11"
+typeCheckingMode = "standard"
+venvPath = "/home/unifyz/.conda/envs"
+venv = "uniulink"

@@ -1,0 +1,73 @@
+# Environment
+.env
+.env.*
+!.env.example
+
+# Python bytecode and caches
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.pyright/
+.coverage
+.coverage.*
+htmlcov/
+
+# Python build and virtual environments
+build/
+dist/
+*.egg
+*.egg-info/
+.eggs/
+.venv/
+venv/
+env/
+ENV/
+.tox/
+.nox/
+
+# Node / frontend
+node_modules/
+frontend/node_modules/
+frontend/dist/
+frontend/.vite/
+*.tsbuildinfo
+
+# Logs and runtime files
+*.log
+logs/
+*.pid
+*.seed
+
+# Local databases and data dumps
+*.db
+*.sqlite
+*.sqlite3
+*.dump
+
+# Docker local data
+postgres_data/
+redis_data/
+docker-data/
+
+# Generated assets
+generated-images/
+.opencode/generated-images/
+
+# OS and editors
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+logs
+test.py
+
+docker-compose.yml
+config.yaml
+opencode.json

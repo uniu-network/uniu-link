@@ -1,0 +1,46 @@
+# FastAPI & Server
+fastapi==0.115.0
+uvicorn[standard]==0.30.6
+python-multipart==0.0.12
+
+# Database
+sqlalchemy[asyncio]==2.0.35
+asyncpg==0.29.0
+alembic==1.13.2
+psycopg2-binary==2.9.12
+
+# Redis
+redis==5.1.1
+
+# HTTP Client
+httpx==0.27.2
+openai==1.93.0
+anthropic==0.57.1
+
+# Encryption
+cryptography==43.0.1
+
+# Scheduling
+apscheduler==3.10.4
+
+# Rate Limiting
+limits==3.13.0
+
+# JSON logging
+python-json-logger==2.0.7
+
+# UUID
+uuid7==0.1.0
+
+# YAML
+PyYAML==6.0.2
+
+# Validation
+pydantic==2.9.2
+pydantic-settings==2.5.2
+
+# JS Sandbox (for custom_js routing strategy)
+PyExecJS==1.5.1
+
+# Template
+jinja2==3.1.4
