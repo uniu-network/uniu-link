@@ -1,10 +1,9 @@
 <template>
   <UiSpinner :show="loading">
     <div class="space-y-6">
-      <div class="grid gap-3 sm:grid-cols-2 xl:grid-cols-5">
+      <div class="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
         <StatCard label="近1小时请求量" :value="formatNumber(stats.total_requests || 0)" />
         <StatCard label="错误率" :value="`${stats.error_rate || 0}%`" :tone="(stats.error_rate || 0) > 5 ? 'danger' : 'success'" />
-        <StatCard label="缓存命中率" :value="`${stats.cache_hit_rate || 0}%`" tone="info" />
         <StatCard label="健康渠道数" :value="`${healthyChannels} / ${totalChannels}`" tone="success" />
         <StatCard label="近1小时 Tokens" :value="formatNumber(stats.token_stats?.total_tokens_last_hour || 0)" :hint="`累计 ${formatNumber(stats.token_stats?.total_tokens_all || 0)}`" />
       </div>
@@ -51,10 +50,6 @@
         </div>
         <UiEmpty v-else title="暂无渠道数据" />
       </UiCard>
-
-      <UiCard title="缓存命中率详情" :padded="false">
-        <UiDataTable :columns="cacheColumns" :data="stats.cache_stats?.models || []" />
-      </UiCard>
     </div>
   </UiSpinner>
 </template>
@@ -67,7 +62,6 @@ import { getDashboardStats } from '@/api/stats'
 import { useTheme } from '@/composables/useTheme'
 import UiBadge from '@/components/ui/UiBadge.vue'
 import UiCard from '@/components/ui/UiCard.vue'
-import UiDataTable from '@/components/ui/UiDataTable.vue'
 import UiEmpty from '@/components/ui/UiEmpty.vue'
 import UiSpinner from '@/components/ui/UiSpinner.vue'
 
@@ -210,23 +204,6 @@ const healthyChannelChartOptions = computed<ApexOptions>(() => ({
     },
   },
 }))
-
-const cacheColumns = [
-  { title: '模型', key: 'model' },
-  { title: '命中', key: 'hit', align: 'right' as const },
-  { title: '未命中', key: 'miss', align: 'right' as const },
-  { title: '总计', key: 'total', align: 'right' as const },
-  {
-    title: '命中率',
-    key: 'hit_rate',
-    align: 'right' as const,
-    render(row: any) {
-      return h(UiBadge, {
-        variant: (row.hit_rate || 0) >= 50 ? 'success' : 'warning',
-      }, { default: () => `${row.hit_rate}%` })
-    },
-  },
-]
 
 async function load() {
   loading.value = true

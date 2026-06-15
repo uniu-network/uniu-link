@@ -39,7 +39,6 @@ CONFIG_META: dict[str, tuple[type, Any, bool, str]] = {
     "rate_limit_global_rps": (int, 1000, True, "全局速率限制(RPS)"),
     "rate_limit_per_key_rps": (int, 100, True, "每密钥速率限制(RPS)"),
     "rate_limit_per_model_rps": (int, 200, True, "每模型速率限制(RPS)"),
-    "cache_default_ttl": (int, 3600, True, "缓存默认过期时间(秒)"),
     "log_level": (str, "INFO", True, "日志级别"),
     "log_file": (str, "", True, "日志文件路径"),
     "raw_json_log": (bool, False, True, "原始 JSON 日志"),
@@ -56,7 +55,6 @@ YAML_SECTION_MAP: dict[str, list[str]] = {
     "circuit_breaker": ["circuit_breaker_failure_threshold", "circuit_breaker_cooldown_seconds",
                         "circuit_breaker_half_open_max_requests"],
     "rate_limit": ["rate_limit_global_rps", "rate_limit_per_key_rps", "rate_limit_per_model_rps"],
-    "cache": ["cache_default_ttl"],
     "logging": ["log_level", "log_file", "raw_json_log", "log_body", "log_content"],
 }
 
@@ -74,9 +72,6 @@ YAML_KEY_ALIASES: dict[str, dict[str, str]] = {
     },
     "redis": {
         "url": "redis_url",
-    },
-    "cache": {
-        "default_ttl": "cache_default_ttl",
     },
     "circuit_breaker": {
         "failure_threshold": "circuit_breaker_failure_threshold",
@@ -118,7 +113,6 @@ class Settings(BaseModel):
     rate_limit_global_rps: int = 1000
     rate_limit_per_key_rps: int = 100
     rate_limit_per_model_rps: int = 200
-    cache_default_ttl: int = 3600
     log_level: str = "INFO"
     log_file: str = ""
     raw_json_log: bool = False

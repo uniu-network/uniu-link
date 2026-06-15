@@ -81,14 +81,13 @@ const sections = computed(() => {
     gateway: { key: 'gateway', label: '网关', items: [] },
     circuit_breaker: { key: 'circuit_breaker', label: '熔断器', items: [] },
     rate_limit: { key: 'rate_limit', label: '速率限制', items: [] },
-    cache: { key: 'cache', label: '缓存', items: [] },
     logging: { key: 'logging', label: '日志', items: [] },
   }
   const keyToSection: Record<string, string> = {
     app_name: 'app', app_env: 'app', encryption_key: 'app', admin_api_key: 'app', admin_hmac_ttl_seconds: 'app',
     postgres_host: 'database', postgres_port: 'database', postgres_db: 'database', postgres_user: 'database', postgres_password: 'database', redis_url: 'redis',
     default_channel_timeout: 'gateway', default_max_retries: 'gateway', health_check_interval: 'gateway', circuit_breaker_failure_threshold: 'circuit_breaker', circuit_breaker_cooldown_seconds: 'circuit_breaker', circuit_breaker_half_open_max_requests: 'circuit_breaker',
-    rate_limit_global_rps: 'rate_limit', rate_limit_per_key_rps: 'rate_limit', rate_limit_per_model_rps: 'rate_limit', cache_default_ttl: 'cache', log_level: 'logging', log_file: 'logging', raw_json_log: 'logging', log_body: 'logging', log_content: 'logging',
+    rate_limit_global_rps: 'rate_limit', rate_limit_per_key_rps: 'rate_limit', rate_limit_per_model_rps: 'rate_limit', log_level: 'logging', log_file: 'logging', raw_json_log: 'logging', log_body: 'logging', log_content: 'logging',
   }
   for (const [key, meta] of Object.entries(configData.value)) {
     const section = sectionMap[keyToSection[key] || 'app']

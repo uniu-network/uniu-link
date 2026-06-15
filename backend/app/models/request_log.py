@@ -1,6 +1,6 @@
 import uuid
 from datetime import datetime
-from sqlalchemy import String, Integer, Float, Boolean, DateTime, Text, func
+from sqlalchemy import String, Integer, Float, DateTime, Text, func
 from sqlalchemy.orm import Mapped, mapped_column
 from app.core.database import Base
 
@@ -22,7 +22,6 @@ class RequestLog(Base):
     status_code: Mapped[int] = mapped_column(Integer, default=0)
     error_message: Mapped[str] = mapped_column(Text, default="")
     thinking_effort: Mapped[str] = mapped_column(String(16), default="none")
-    cache_hit: Mapped[bool] = mapped_column(Boolean, default=False)
     prompt_tokens: Mapped[int] = mapped_column(Integer, default=0)
     completion_tokens: Mapped[int] = mapped_column(Integer, default=0)
     total_tokens: Mapped[int] = mapped_column(Integer, default=0)

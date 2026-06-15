@@ -8,10 +8,6 @@
         </select>
         <input v-model="filters.model" placeholder="模型名称" class="form-input w-40" />
         <input v-model.number="filters.status" type="number" placeholder="状态码" class="form-input w-32" />
-        <select v-model="filters.cache_hit" class="form-input w-44">
-          <option :value="null">全部缓存状态</option>
-          <option v-for="option in cacheHitOptions" :key="option.value" :value="option.value">{{ option.label }}</option>
-        </select>
         <UiButton variant="primary" :loading="loading" @click="load">查询</UiButton>
       </div>
     </UiCard>
@@ -82,7 +78,7 @@ const loading = ref(true)
 const page = ref(1)
 const pageSize = ref(20)
 const total = ref(0)
-const filters = ref<{ api_type: string | null; model: string; status: number | null; cache_hit: string | null }>({ api_type: null, model: '', status: null, cache_hit: null })
+const filters = ref<{ api_type: string | null; model: string; status: number | null }>({ api_type: null, model: '', status: null })
 
 const drawerVisible = ref(false)
 const selectedLog = ref<any>(null)
@@ -91,11 +87,6 @@ const apiTypeOptions = [
   { label: 'OpenAI', value: 'openai' },
   { label: 'Responses', value: 'responses' },
   { label: 'Claude', value: 'claude' },
-]
-
-const cacheHitOptions = [
-  { label: '缓存命中', value: 'true' },
-  { label: '未命中', value: 'false' },
 ]
 
 const basicInfo = computed(() => selectedLog.value ? [
@@ -113,7 +104,7 @@ const tokenInfo = computed(() => selectedLog.value ? [
   { label: 'Prompt', value: selectedLog.value.prompt_tokens ?? '-' },
   { label: 'Completion', value: selectedLog.value.completion_tokens ?? '-' },
   { label: 'Total', value: selectedLog.value.total_tokens ?? '-' },
-  { label: 'Cache', value: selectedLog.value.cache_tokens ?? '-' },
+  { label: '输入缓存', value: selectedLog.value.cache_tokens ?? '-' },
 ] : [])
 
 function formatDate(d: string) {
@@ -146,7 +137,6 @@ const columns = [
   { title: '响应Token', key: 'completion_tokens' },
   { title: '总Token', key: 'total_tokens' },
   { title: '状态码', key: 'status_code', render: (row: any) => h('span', { class: row.status_code >= 400 ? 'text-red-600 dark:text-red-400' : 'text-emerald-600 dark:text-emerald-400' }, String(row.status_code)) },
-  { title: '缓存', key: 'cache_hit', render: (row: any) => row.cache_hit ? h(UiBadge, { variant: 'info' }, { default: () => '命中' }) : '-' },
   { title: '时间', key: 'created_at' },
   { title: '错误', key: 'error_message', render: (row: any) => h('span', { class: 'text-xs text-red-600 dark:text-red-400' }, row.error_message || '-') },
   { title: '操作', key: 'actions', render: (row: any) => h(UiButton, { size: 'sm', onClick: () => openDetail(row) }, { default: () => '详情' }) },
@@ -159,7 +149,6 @@ async function load() {
     if (filters.value.api_type) params.api_type = filters.value.api_type
     if (filters.value.model) params.model = filters.value.model
     if (filters.value.status !== null && filters.value.status !== undefined) params.status = filters.value.status
-    if (filters.value.cache_hit !== null && filters.value.cache_hit !== undefined) params.cache_hit = filters.value.cache_hit === 'true'
     const res = await listLogs(params)
     logs.value = res.data || []
     total.value = res.total || 0

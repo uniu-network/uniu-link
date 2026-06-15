@@ -21,7 +21,6 @@ from app.models.request_log import RequestLog
 from app.models.plugin import Plugin as PluginModel
 from app.models.api_key import ApiKey
 from app.services.health_checker import get_channel_health_status
-from app.services.cache_service import get_cache_stats, delete_cache_for_model, clear_all_cache
 from app.services.circuit_breaker import reset_circuit
 from app.core.config import config_manager, CONFIG_META, SENSITIVE_KEYS
 from app.core.response import success_response, error_response
@@ -105,9 +104,6 @@ class ModelCreate(BaseModel):
     supports_thinking: bool = False
     default_thinking_effort: str = "none"
     claude_thinking_mode: str = "adaptive"
-    enable_cache: bool = False
-    cache_ttl_seconds: int = 3600
-    cache_key_exclude_fields: str = "[]"
 
 class ModelUpdate(BaseModel):
     display_name: Optional[str] = None
@@ -118,9 +114,6 @@ class ModelUpdate(BaseModel):
     supports_thinking: Optional[bool] = None
     default_thinking_effort: Optional[str] = None
     claude_thinking_mode: Optional[str] = None
-    enable_cache: Optional[bool] = None
-    cache_ttl_seconds: Optional[int] = None
-    cache_key_exclude_fields: Optional[str] = None
 
 class ChannelRefCreate(BaseModel):
     channel_id: Optional[str] = None
@@ -254,12 +247,6 @@ async def get_dashboard_stats(db: AsyncSession = Depends(get_db)):
         })
     healthy_channel_count = sum(1 for ch in channel_health if ch["health_status"] == "healthy")
 
-    cache_stats = await get_cache_stats()
-    total_cache_hit = sum(m.get("hit", 0) for m in cache_stats.get("models", []))
-    total_cache_miss = sum(m.get("miss", 0) for m in cache_stats.get("models", []))
-    total_cache = total_cache_hit + total_cache_miss
-    cache_hit_rate = round(total_cache_hit / total_cache * 100, 2) if total_cache > 0 else 0.0
-
     token_hour_result = await db.execute(
         select(
             func.coalesce(func.sum(RequestLog.prompt_tokens), 0),
@@ -355,8 +342,6 @@ async def get_dashboard_stats(db: AsyncSession = Depends(get_db)):
         "channel_health": channel_health,
         "healthy_channels": healthy_channel_count,
         "total_channels": len(channel_health),
-        "cache_hit_rate": cache_hit_rate,
-        "cache_stats": cache_stats,
         "token_stats": {
             "prompt_tokens_last_hour": int(prompt_tokens_hour or 0),
             "completion_tokens_last_hour": int(completion_tokens_hour or 0),
@@ -657,9 +642,6 @@ async def list_models(db: AsyncSession = Depends(get_db)):
             "supports_thinking": m.supports_thinking,
             "default_thinking_effort": m.default_thinking_effort,
             "claude_thinking_mode": m.claude_thinking_mode,
-            "enable_cache": m.enable_cache,
-            "cache_ttl_seconds": m.cache_ttl_seconds,
-            "cache_key_exclude_fields": m.cache_key_exclude_fields,
             "channel_refs": channel_refs,
             "created_at": m.created_at.isoformat() if m.created_at else "",
             "updated_at": m.updated_at.isoformat() if m.updated_at else "",
@@ -681,8 +663,6 @@ async def get_model(model_id: str, db: AsyncSession = Depends(get_db)):
         "supports_thinking": m.supports_thinking,
         "default_thinking_effort": m.default_thinking_effort,
         "claude_thinking_mode": m.claude_thinking_mode,
-        "enable_cache": m.enable_cache, "cache_ttl_seconds": m.cache_ttl_seconds,
-        "cache_key_exclude_fields": m.cache_key_exclude_fields,
         "created_at": m.created_at.isoformat() if m.created_at else "",
         "updated_at": m.updated_at.isoformat() if m.updated_at else "",
     })
@@ -705,9 +685,6 @@ async def create_model(data: ModelCreate, db: AsyncSession = Depends(get_db)):
         supports_thinking=data.supports_thinking,
         default_thinking_effort=data.default_thinking_effort,
         claude_thinking_mode=data.claude_thinking_mode,
-        enable_cache=data.enable_cache,
-        cache_ttl_seconds=data.cache_ttl_seconds,
-        cache_key_exclude_fields=data.cache_key_exclude_fields,
     )
     db.add(model)
     await db.commit()
@@ -859,7 +836,6 @@ async def list_logs(
     model: Optional[str] = Query(None),
     channel_id: Optional[str] = Query(None),
     status: Optional[int] = Query(None),
-    cache_hit: Optional[bool] = Query(None),
     from_date: Optional[str] = Query(None),
     to_date: Optional[str] = Query(None),
     page: int = Query(1, ge=1),
@@ -876,8 +852,6 @@ async def list_logs(
         conditions.append(RequestLog.selected_channel_id == channel_id)
     if status is not None:
         conditions.append(RequestLog.status_code == status)
-    if cache_hit is not None:
-        conditions.append(RequestLog.cache_hit == cache_hit)
     if from_date:
         try:
             dt = datetime.fromisoformat(from_date)
@@ -917,7 +891,6 @@ async def list_logs(
                 "status_code": log.status_code,
                 "error_message": log.error_message,
                 "thinking_effort": log.thinking_effort or "none",
-                "cache_hit": log.cache_hit,
                 "prompt_tokens": log.prompt_tokens,
                 "completion_tokens": log.completion_tokens,
                 "total_tokens": log.total_tokens,
@@ -934,19 +907,6 @@ async def list_logs(
         "page": page,
         "page_size": page_size,
     })
-
-@admin_router.get("/cache/stats")
-async def cache_stats():
-    return success_response(detail_result=await get_cache_stats())
-
-@admin_router.post("/cache/clear")
-async def clear_cache(model: Optional[str] = Query(None)):
-    if model:
-        await delete_cache_for_model(model)
-        return success_response(detail_result={"message": f"Cache cleared for model '{model}'"})
-    else:
-        await clear_all_cache()
-        return success_response(detail_result={"message": "All cache cleared"})
 
 @admin_router.get("/plugins")
 async def list_plugins(db: AsyncSession = Depends(get_db)):

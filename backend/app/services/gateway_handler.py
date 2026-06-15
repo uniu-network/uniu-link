@@ -11,13 +11,8 @@ from app.core.response import api_error_body, api_error_response, api_error_type
 from app.core.http_debug import log_upstream_request, log_upstream_response
 from app.core.logging import get_logger
 from app.middleware.request_id import get_trace_id
-from app.middleware.auth import extract_client_api_key, hash_api_key
 from app.services.api_key_service import increment_token_usage, check_model_access
 from app.services.routing_engine import route_request, ChannelInfo
-from app.services.cache_service import (
-    generate_cache_key, get_cached_response, set_cached_response,
-    record_cache_hit, record_cache_miss,
-)
 from app.services.circuit_breaker import record_success, record_failure
 from app.services.rate_limiter import check_rate_limit
 from app.adapters.generic_adapter import get_adapter
@@ -298,7 +293,6 @@ def _request_log_context(
     channel_id: str = "",
     channel_name: str = "",
     upstream_url: str = "",
-    cache_hit: bool = False,
     thinking_effort: str = "none",
     token_usage: dict[str, int] | None = None,
     request_body: str = "",
@@ -318,7 +312,6 @@ def _request_log_context(
         "status_code": status_code,
         "error_message": error_message,
         "thinking_effort": thinking_effort or "none",
-        "cache_hit": cache_hit,
         **(token_usage or _empty_token_usage()),
         "request_body": request_body,
         "response_body": response_body,
@@ -497,44 +490,6 @@ async def handle_gateway_request(
             headers={"x-request-id": trace_id, "x-trace-id": trace_id},
         )
 
-    exclude_fields: list[str] = []
-
-    if model_config and model_config.enable_cache and not request_body.get("stream", False):
-        import json as _json
-        try:
-            if model_config.cache_key_exclude_fields:
-                parsed_exclude_fields = _json.loads(model_config.cache_key_exclude_fields)
-                if isinstance(parsed_exclude_fields, list):
-                    exclude_fields = [str(field) for field in parsed_exclude_fields]
-        except Exception:
-            pass
-
-        cache_key = generate_cache_key(
-            api_type, model_name, request_body, api_key_hash, exclude_fields
-        )
-        cached = await get_cached_response(cache_key)
-        if cached:
-            await record_cache_hit(model_name)
-            response_data = cached["body"]
-            status_code = cached.get("status_code", 200)
-            headers = cached.get("headers", {})
-            _add_request_log_task(
-                background_tasks,
-                _request_log_context(
-                    trace_id, api_key_hash, api_type, model_name, start_time,
-                    status_code, channel_id="cache", channel_name="cache",
-                    cache_hit=True, token_usage=extract_token_usage(response_data),
-                    thinking_effort=thinking_effort,
-                    request_body=_serialize_body_for_log(request_body),
-                    response_body=_serialize_body_for_log(response_data),
-                    input_content=_extract_input_content(request_body),
-                    output_content=_extract_output_content(response_data),
-                ),
-            )
-            return JSONResponse(content=response_data, status_code=status_code, headers=headers)
-
-        await record_cache_miss(model_name)
-
     request_body = await plugin_engine.execute_hook(
         "pre_route", request_body=request_body, api_type=api_type,
         context={"trace_id": trace_id, "api_key_hash": api_key_hash}
@@ -559,19 +514,61 @@ async def handle_gateway_request(
         context={"trace_id": trace_id, "api_type": api_type, "model": model_name}
     )
 
-    if not channels:
+    try:
+        channel, response, status_code, channel_url = await _call_upstream_channels(
+            channels, request_body, api_type, trace_id, api_key_hash, model_config
+        )
+    except NoRetryError as e:
         _add_request_log_task(
             background_tasks,
             _request_log_context(
-                trace_id, api_key_hash, api_type, model_name, start_time, 503,
-                f"No available channels for model '{model_name}'",
+                trace_id, api_key_hash, api_type, model_name, start_time,
+                e.status_code, extract_error_message(e.error_body),
                 thinking_effort=thinking_effort,
             ),
         )
-        return create_error_response(
-            503, f"No available channels for model '{model_name}'", api_type
+        return JSONResponse(content=e.error_body, status_code=e.status_code)
+    except UpstreamAPIError as e:
+        _add_request_log_task(
+            background_tasks,
+            _request_log_context(
+                trace_id, api_key_hash, api_type, model_name, start_time,
+                e.status_code, extract_error_message(e.error_body),
+                thinking_effort=thinking_effort,
+            ),
         )
+        return JSONResponse(content=e.error_body, status_code=e.status_code)
 
+    token_usage = extract_token_usage(response)
+    _add_request_log_task(
+        background_tasks,
+        _request_log_context(
+            trace_id, api_key_hash, api_type, model_name, start_time,
+            status_code, channel_id=channel.channel_id or "inline",
+            channel_name=channel.name, upstream_url=channel_url,
+            token_usage=token_usage,
+            thinking_effort=thinking_effort,
+            request_body=_serialize_body_for_log(request_body),
+            response_body=_serialize_body_for_log(response),
+            input_content=_extract_input_content(request_body),
+            output_content=_extract_output_content(response),
+        ),
+    )
+
+    if api_key_id and token_usage.get("total_tokens", 0) > 0:
+        await increment_token_usage(api_key_id, token_usage["total_tokens"])
+
+    return JSONResponse(content=response, status_code=status_code)
+
+
+async def _call_upstream_channels(
+    channels: list[ChannelInfo],
+    request_body: dict[str, Any],
+    api_type: str,
+    trace_id: str,
+    api_key_hash: str,
+    model_config: Any | None,
+) -> tuple[ChannelInfo, dict[str, Any], int, str]:
     last_error = None
     last_status_code = 503
 
@@ -580,55 +577,13 @@ async def handle_gateway_request(
             response, status_code, channel_url = await try_channel(
                 channel, request_body, api_type, trace_id, api_key_hash, model_config
             )
-            last_status_code = status_code
 
             if channel.channel_id:
                 await record_success(channel.channel_id)
 
-            if model_config and model_config.enable_cache and not request_body.get("stream", False):
-                cache_key = generate_cache_key(
-                    api_type, model_name, request_body, api_key_hash, exclude_fields
-                )
-                ttl = model_config.cache_ttl_seconds or settings.cache_default_ttl
-                cache_data = {
-                    "body": response,
-                    "status_code": status_code,
-                    "headers": {"content-type": "application/json"},
-                }
-                await set_cached_response(cache_key, cache_data, ttl)
-
-            token_usage = extract_token_usage(response)
-            _add_request_log_task(
-                background_tasks,
-                _request_log_context(
-                    trace_id, api_key_hash, api_type, model_name, start_time,
-                    status_code, channel_id=channel.channel_id or "inline",
-                    channel_name=channel.name, upstream_url=channel_url,
-                    token_usage=token_usage,
-                    thinking_effort=thinking_effort,
-                    request_body=_serialize_body_for_log(request_body),
-                    response_body=_serialize_body_for_log(response),
-                    input_content=_extract_input_content(request_body),
-                    output_content=_extract_output_content(response),
-                ),
-            )
-
-            if api_key_id and token_usage.get("total_tokens", 0) > 0:
-                await increment_token_usage(api_key_id, token_usage["total_tokens"])
-
-            return JSONResponse(content=response, status_code=status_code)
-        except NoRetryError as e:
-            _add_request_log_task(
-                background_tasks,
-                _request_log_context(
-                    trace_id, api_key_hash, api_type, model_name, start_time,
-                    e.status_code, extract_error_message(e.error_body),
-                    channel_id=channel.channel_id or "inline",
-                    channel_name=channel.name,
-                    thinking_effort=thinking_effort,
-                ),
-            )
-            return JSONResponse(content=e.error_body, status_code=e.status_code)
+            return channel, response, status_code, channel_url
+        except NoRetryError:
+            raise
         except Exception as e:
             last_error = str(e)
             last_status_code = getattr(e, "status_code", 500)
@@ -638,7 +593,7 @@ async def handle_gateway_request(
 
             error_decision = await plugin_engine.execute_hook(
                 "on_error", error=e, channel_info=channel,
-                context={"trace_id": trace_id, "api_type": api_type, "model": model_name}
+                context={"trace_id": trace_id, "api_type": api_type, "model": request_body.get("model", "")}
             )
             if error_decision and not error_decision.get("retry", True):
                 break
@@ -648,19 +603,14 @@ async def handle_gateway_request(
                 extra={"trace_id": trace_id, "error": str(e)[:200]}
             )
 
-    _add_request_log_task(
-        background_tasks,
-        _request_log_context(
-            trace_id, api_key_hash, api_type, model_name, start_time,
-            last_status_code, last_error or "All channels failed",
-            thinking_effort=thinking_effort,
+    raise UpstreamAPIError(
+        status_code=last_status_code,
+        error_body=create_error_body(
+            last_status_code,
+            last_error or "All upstream channels failed",
+            api_type,
+            {},
         ),
-    )
-
-    return create_error_response(
-        last_status_code,
-        last_error or "All upstream channels failed",
-        api_type,
     )
 
 async def try_channel(

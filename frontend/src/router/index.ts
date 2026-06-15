@@ -38,12 +38,6 @@ const routes = [
     meta: { requiresAuth: true, title: '请求日志' },
   },
   {
-    path: '/cache',
-    name: 'Cache',
-    component: () => import('@/views/Cache.vue'),
-    meta: { requiresAuth: true, title: '缓存管理' },
-  },
-  {
     path: '/plugins',
     name: 'Plugins',
     component: () => import('@/views/Plugins.vue'),

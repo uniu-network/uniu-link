@@ -28,12 +28,6 @@ def _to_float(value: Any) -> float:
         return 0.0
 
 
-def _to_bool(value: Any) -> bool:
-    if isinstance(value, bool):
-        return value
-    return str(value).lower() == "true"
-
-
 class LoggingPlugin(PluginHook):
 
     name = "logging"
@@ -56,7 +50,6 @@ class LoggingPlugin(PluginHook):
                 status_code=_to_int(context.get("status_code", 0)),
                 error_message=_limit(context.get("error_message", ""), 1000),
                 thinking_effort=_limit(context.get("thinking_effort", "none"), 16) or "none",
-                cache_hit=_to_bool(context.get("cache_hit", False)),
                 prompt_tokens=_to_int(context.get("prompt_tokens", 0)),
                 completion_tokens=_to_int(context.get("completion_tokens", 0)),
                 total_tokens=_to_int(context.get("total_tokens", 0)),

@@ -32,7 +32,8 @@ database:
   password: change-me
 
 redis:
-  # Redis 连接地址。使用 docker-compose 时保持 redis 主机名。
+  # Redis 连接地址，用于限流、API Key 缓存、熔断状态等运行时数据。
+  # 使用 docker-compose 时保持 redis 主机名。
   url: redis://redis:6379/0
 
 gateway:
@@ -58,10 +59,6 @@ rate_limit:
   per_key_rps: 100
   # 单个模型的请求速率限制，单位为 RPS。
   per_model_rps: 200
-
-cache:
-  # 缓存默认过期时间，单位为秒。
-  default_ttl: 3600
 
 logging:
   # 日志级别，可选 DEBUG、INFO、WARNING、ERROR。
