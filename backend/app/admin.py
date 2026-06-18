@@ -58,6 +58,9 @@ class ChannelTestRequest(BaseModel):
     model: str
     message: str = "Hi, please respond with a short greeting to confirm you are working."
 
+DEFAULT_HEALTH_CHECK_PROMPT = "Hi, please respond with a short greeting to confirm you are working."
+HEALTH_CHECK_MODES = {"model_list", "prompt"}
+
 class ChannelCreate(BaseModel):
     name: str
     provider: str = "openai"
@@ -69,6 +72,10 @@ class ChannelCreate(BaseModel):
     default_weight: float = 1.0
     upstream_models: list[str] = Field(default_factory=list)
     custom_headers: Optional[dict] = None
+    health_check_mode: str = "model_list"
+    health_check_model: str = ""
+    health_check_prompt: str = DEFAULT_HEALTH_CHECK_PROMPT
+    health_check_max_tokens: int = 32
 
 class ChannelUpdate(BaseModel):
     name: Optional[str] = None
@@ -81,6 +88,10 @@ class ChannelUpdate(BaseModel):
     default_weight: Optional[float] = None
     upstream_models: Optional[list[str]] = None
     custom_headers: Optional[dict] = None
+    health_check_mode: Optional[str] = None
+    health_check_model: Optional[str] = None
+    health_check_prompt: Optional[str] = None
+    health_check_max_tokens: Optional[int] = None
 
 THINKING_EFFORTS = {"none", "low", "medium", "high"}
 CLAUDE_THINKING_MODES = {"adaptive", "enabled", "disabled"}
@@ -154,6 +165,24 @@ def _validate_channel_api_type(api_type: Optional[str], provider: str) -> str:
     if provider in ("openai", "azure", "google") and api_type == "claude":
         raise HTTPException(status_code=400, detail=f"{provider} channels cannot use claude api_type")
     return normalize_channel_api_type(api_type or _default_api_type_for_provider(provider), provider)
+
+
+def _validate_channel_health_check_config(
+    mode: str,
+    model: str,
+    upstream_models: list[str],
+    max_tokens: int,
+) -> None:
+    if mode not in HEALTH_CHECK_MODES:
+        raise HTTPException(status_code=400, detail="health_check_mode must be model_list or prompt")
+    if max_tokens <= 0:
+        raise HTTPException(status_code=400, detail="health_check_max_tokens must be greater than 0")
+    if mode != "prompt":
+        return
+    if not upstream_models:
+        raise HTTPException(status_code=400, detail="prompt health check requires upstream_models")
+    if model and model not in upstream_models:
+        raise HTTPException(status_code=400, detail="health_check_model must be one of upstream_models")
 
 
 async def _fetch_channel_upstream_models(channel: Channel) -> list[str]:
@@ -374,6 +403,10 @@ async def list_channels(db: AsyncSession = Depends(get_db)):
             "max_retries": ch.max_retries, "default_weight": ch.weight,
             "upstream_models": ch.upstream_models or [],
             "custom_headers": ch.custom_headers or {},
+            "health_check_mode": ch.health_check_mode or "model_list",
+            "health_check_model": ch.health_check_model or "",
+            "health_check_prompt": ch.health_check_prompt or DEFAULT_HEALTH_CHECK_PROMPT,
+            "health_check_max_tokens": ch.health_check_max_tokens or 32,
             "health_status": health,
             "circuit_state": ch.circuit_state,
             "created_at": ch.created_at.isoformat() if ch.created_at else "",
@@ -395,6 +428,10 @@ async def get_channel(channel_id: str, db: AsyncSession = Depends(get_db)):
         "max_retries": ch.max_retries, "default_weight": ch.weight,
         "upstream_models": ch.upstream_models or [],
         "custom_headers": ch.custom_headers or {},
+        "health_check_mode": ch.health_check_mode or "model_list",
+        "health_check_model": ch.health_check_model or "",
+        "health_check_prompt": ch.health_check_prompt or DEFAULT_HEALTH_CHECK_PROMPT,
+        "health_check_max_tokens": ch.health_check_max_tokens or 32,
         "health_status": health,
         "circuit_state": ch.circuit_state,
         "created_at": ch.created_at.isoformat() if ch.created_at else "",
@@ -405,6 +442,13 @@ async def get_channel(channel_id: str, db: AsyncSession = Depends(get_db)):
 async def create_channel(data: ChannelCreate, db: AsyncSession = Depends(get_db)):
     encrypted_key = key_encryption.encrypt(data.api_key)
     api_type = _validate_channel_api_type(data.api_type, data.provider)
+    health_check_model = data.health_check_model or (data.upstream_models[0] if data.health_check_mode == "prompt" and data.upstream_models else "")
+    _validate_channel_health_check_config(
+        data.health_check_mode,
+        health_check_model,
+        data.upstream_models,
+        data.health_check_max_tokens,
+    )
     channel = Channel(
         id=str(uuid.uuid4()),
         name=data.name,
@@ -417,6 +461,10 @@ async def create_channel(data: ChannelCreate, db: AsyncSession = Depends(get_db)
         weight=data.default_weight,
         upstream_models=data.upstream_models,
         custom_headers=data.custom_headers,
+        health_check_mode=data.health_check_mode,
+        health_check_model=health_check_model,
+        health_check_prompt=data.health_check_prompt or DEFAULT_HEALTH_CHECK_PROMPT,
+        health_check_max_tokens=data.health_check_max_tokens or 32,
     )
     db.add(channel)
     await db.commit()
@@ -454,6 +502,24 @@ async def update_channel(channel_id: str, data: ChannelUpdate, db: AsyncSession 
     if data.custom_headers is not None:
         ch.custom_headers = data.custom_headers
 
+    next_health_check_mode = data.health_check_mode if data.health_check_mode is not None else (ch.health_check_mode or "model_list")
+    next_health_check_model = data.health_check_model if data.health_check_model is not None else (ch.health_check_model or "")
+    next_upstream_models = ch.upstream_models or []
+    if next_health_check_mode == "prompt" and not next_health_check_model and next_upstream_models:
+        next_health_check_model = next_upstream_models[0]
+    next_health_check_max_tokens = data.health_check_max_tokens if data.health_check_max_tokens is not None else (ch.health_check_max_tokens or 32)
+    _validate_channel_health_check_config(
+        next_health_check_mode,
+        next_health_check_model,
+        next_upstream_models,
+        next_health_check_max_tokens,
+    )
+    ch.health_check_mode = next_health_check_mode
+    ch.health_check_model = next_health_check_model
+    if data.health_check_prompt is not None:
+        ch.health_check_prompt = data.health_check_prompt or DEFAULT_HEALTH_CHECK_PROMPT
+    ch.health_check_max_tokens = next_health_check_max_tokens
+
     db.add(ch)
     await db.commit()
     return success_response(detail_result={"id": ch.id, "message": "Channel updated"})
@@ -467,6 +533,12 @@ async def sync_channel_models(channel_id: str, db: AsyncSession = Depends(get_db
 
     models = await _fetch_channel_upstream_models(ch)
     ch.upstream_models = models
+    if ch.health_check_mode == "prompt":
+        if not models:
+            ch.health_check_mode = "model_list"
+            ch.health_check_model = ""
+        elif ch.health_check_model not in models:
+            ch.health_check_model = models[0]
     db.add(ch)
     await db.commit()
     return success_response(detail_result={"id": ch.id, "upstream_models": models, "total": len(models)})

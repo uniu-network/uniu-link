@@ -16,6 +16,37 @@ from app.services.redis_client import get_redis
 logger = get_logger(__name__)
 
 HEALTH_CHECK_KEY = "health_check:channel:{}"
+DEFAULT_HEALTH_CHECK_PROMPT = "Hi, please respond with a short greeting to confirm you are working."
+
+
+def _build_health_check_request(channel: Channel, api_type: str) -> dict | None:
+    upstream_models = channel.upstream_models or []
+    model = channel.health_check_model or (upstream_models[0] if upstream_models else "")
+    if model and model not in upstream_models:
+        return None
+    if not model:
+        return None
+
+    prompt = channel.health_check_prompt or DEFAULT_HEALTH_CHECK_PROMPT
+    max_tokens = channel.health_check_max_tokens or 32
+
+    if api_type == "claude":
+        return {
+            "model": model,
+            "messages": [{"role": "user", "content": prompt}],
+            "max_tokens": max_tokens,
+        }
+    if api_type == "responses":
+        return {
+            "model": model,
+            "input": prompt,
+            "max_output_tokens": max_tokens,
+        }
+    return {
+        "model": model,
+        "messages": [{"role": "user", "content": prompt}],
+        "max_tokens": max_tokens,
+    }
 
 
 async def check_channel_health(channel: Channel) -> bool:
@@ -26,21 +57,30 @@ async def check_channel_health(channel: Channel) -> bool:
         headers = merge_custom_headers(headers, channel.custom_headers)
         api_type = normalize_channel_api_type(channel.api_type, channel.provider)
 
-        url = f"{channel.base_url.rstrip('/')}/v1/models"
-
         async with httpx.AsyncClient(timeout=10.0) as client:
-            log_upstream_request(logger, "GET", url, trace_id="health_check", channel=channel.name)
-            resp = await client.get(url, headers=headers)
-            log_upstream_response(logger, "GET", url, resp.status_code, resp.text, "health_check", channel.name)
+            if channel.health_check_mode == "prompt":
+                request_body = _build_health_check_request(channel, api_type)
+                if request_body is None:
+                    return False
+                provider_request = adapter.convert_request(request_body, api_type)
+                url = adapter.get_url(channel.base_url, api_type)
+                log_upstream_request(logger, "POST", url, provider_request, trace_id="health_check", channel=channel.name)
+                resp = await client.post(url, json=provider_request, headers=headers)
+                log_upstream_response(logger, "POST", url, resp.status_code, resp.text[:500], "health_check", channel.name)
+            else:
+                url = f"{channel.base_url.rstrip('/')}/v1/models"
+                log_upstream_request(logger, "GET", url, trace_id="health_check", channel=channel.name)
+                resp = await client.get(url, headers=headers)
+                log_upstream_response(logger, "GET", url, resp.status_code, resp.text, "health_check", channel.name)
 
-
-            is_healthy = 200 <= resp.status_code < 300 or resp.status_code == 429
+            is_healthy = 200 <= resp.status_code < 300
 
         logger.info(
             "Health check result",
             extra={
                 "channel": channel.name,
                 "provider": channel.provider,
+                "mode": channel.health_check_mode,
                 "status": resp.status_code,
                 "healthy": is_healthy,
                 "trace_id": "health_check",

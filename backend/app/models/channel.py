@@ -25,6 +25,13 @@ class Channel(Base):
     weight: Mapped[float] = mapped_column(Float, default=1.0)
     upstream_models: Mapped[list[str]] = mapped_column(JSON, default=list)
     custom_headers: Mapped[dict | None] = mapped_column(JSON, nullable=True, default=None)
+    health_check_mode: Mapped[str] = mapped_column(String(16), default="model_list")
+    health_check_model: Mapped[str] = mapped_column(String(128), default="")
+    health_check_prompt: Mapped[str] = mapped_column(
+        Text,
+        default="Hi, please respond with a short greeting to confirm you are working.",
+    )
+    health_check_max_tokens: Mapped[int] = mapped_column(Integer, default=32)
     health_status: Mapped[str] = mapped_column(String(16), default="unknown")
     circuit_state: Mapped[str] = mapped_column(String(16), default="closed")
     created_at: Mapped[datetime] = mapped_column(
