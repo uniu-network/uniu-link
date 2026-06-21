@@ -1,6 +1,6 @@
 import json
 import time
-from typing import Any
+from typing import Any, TypedDict
 
 import httpx
 from fastapi import Request, HTTPException, BackgroundTasks
@@ -31,6 +31,11 @@ from app.services.request_transformer import (
 )
 
 logger = get_logger(__name__)
+
+class ApiKeyLogContext(TypedDict):
+    from_apikey: str
+    from_apikey_name: str
+
 
 class NoRetryError(Exception):
 
@@ -282,6 +287,21 @@ def _serialize_body_for_log(data: Any) -> str:
     except Exception:
         return _truncate(str(data))
 
+def _api_key_log_context(api_key_info: dict[str, Any] | None) -> ApiKeyLogContext:
+    if not api_key_info:
+        return {"from_apikey": "", "from_apikey_name": ""}
+
+    from_apikey = str(api_key_info.get("id") or "")
+    from_apikey_name = str(api_key_info.get("name") or "")
+    if not from_apikey and api_key_info.get("key_hash") == "admin_playground":
+        from_apikey = "admin_playground"
+        from_apikey_name = from_apikey_name or "Admin Playground"
+
+    return {
+        "from_apikey": from_apikey,
+        "from_apikey_name": from_apikey_name,
+    }
+
 def _request_log_context(
     trace_id: str,
     api_key_hash: str,
@@ -299,10 +319,14 @@ def _request_log_context(
     response_body: str = "",
     input_content: str = "",
     output_content: str = "",
+    from_apikey: str = "",
+    from_apikey_name: str = "",
 ) -> dict[str, Any]:
     return {
         "trace_id": trace_id,
         "api_key_hash": api_key_hash,
+        "from_apikey": from_apikey,
+        "from_apikey_name": from_apikey_name,
         "api_type": api_type,
         "model": model,
         "channel_id": channel_id,
@@ -404,6 +428,7 @@ async def handle_gateway_request(
     api_key_info = getattr(request.state, "api_key_info", None)
     api_key_hash = api_key_info["key_hash"] if api_key_info else ""
     api_key_id = api_key_info["id"] if api_key_info else None
+    api_key_log_context = _api_key_log_context(api_key_info)
 
     try:
         parsed_body = await request.json()
@@ -413,6 +438,7 @@ async def handle_gateway_request(
             _request_log_context(
                 trace_id, api_key_hash, api_type, "", start_time, 400,
                 "Invalid JSON request body",
+                **api_key_log_context,
             ),
         )
         return create_error_response(400, "Invalid JSON request body", api_type)
@@ -422,6 +448,7 @@ async def handle_gateway_request(
             _request_log_context(
                 trace_id, api_key_hash, api_type, "", start_time, 400,
                 "JSON request body must be an object",
+                **api_key_log_context,
             ),
         )
         return create_error_response(400, "JSON request body must be an object", api_type)
@@ -435,6 +462,7 @@ async def handle_gateway_request(
             _request_log_context(
                 trace_id, api_key_hash, api_type, "", start_time, 400,
                 "model is required",
+                **api_key_log_context,
             ),
         )
         return create_error_response(400, "model is required", api_type)
@@ -445,6 +473,7 @@ async def handle_gateway_request(
             _request_log_context(
                 trace_id, api_key_hash, api_type, model_name, start_time, 403,
                 f"API key does not have access to model '{model_name}'",
+                **api_key_log_context,
             ),
         )
         return create_error_response(403, f"This API key does not have access to model '{model_name}'", api_type)
@@ -456,6 +485,7 @@ async def handle_gateway_request(
             _request_log_context(
                 trace_id, api_key_hash, api_type, model_name, start_time, 429,
                 f"Rate limit exceeded: {rate_limit_reason}",
+                **api_key_log_context,
             ),
         )
         return create_error_response(429, f"Rate limit exceeded: {rate_limit_reason}", api_type)
@@ -480,6 +510,7 @@ async def handle_gateway_request(
             thinking_effort=thinking_effort,
             request_body=_serialize_body_for_log(request_body),
             input_content=_extract_input_content(request_body),
+            **api_key_log_context,
         )
         _add_request_log_task(background_tasks, log_context)
         return StreamingResponse(
@@ -501,6 +532,7 @@ async def handle_gateway_request(
                 trace_id, api_key_hash, api_type, model_name, start_time, 500,
                 "pre_route hook returned invalid request body",
                 thinking_effort=thinking_effort,
+                **api_key_log_context,
             ),
         )
         return create_error_response(500, "pre_route hook returned invalid request body", api_type)
@@ -525,6 +557,7 @@ async def handle_gateway_request(
                 trace_id, api_key_hash, api_type, model_name, start_time,
                 e.status_code, extract_error_message(e.error_body),
                 thinking_effort=thinking_effort,
+                **api_key_log_context,
             ),
         )
         return JSONResponse(content=e.error_body, status_code=e.status_code)
@@ -535,6 +568,7 @@ async def handle_gateway_request(
                 trace_id, api_key_hash, api_type, model_name, start_time,
                 e.status_code, extract_error_message(e.error_body),
                 thinking_effort=thinking_effort,
+                **api_key_log_context,
             ),
         )
         return JSONResponse(content=e.error_body, status_code=e.status_code)
@@ -552,6 +586,7 @@ async def handle_gateway_request(
             response_body=_serialize_body_for_log(response),
             input_content=_extract_input_content(request_body),
             output_content=_extract_output_content(response),
+            **api_key_log_context,
         ),
     )
 

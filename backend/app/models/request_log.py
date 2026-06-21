@@ -13,6 +13,8 @@ class RequestLog(Base):
     )
     trace_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
     api_key_hash: Mapped[str] = mapped_column(String(128), default="")
+    from_apikey: Mapped[str] = mapped_column(String(36), default="", index=True)
+    from_apikey_name: Mapped[str] = mapped_column(String(128), default="")
     api_type: Mapped[str] = mapped_column(String(16), nullable=False)
     model: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
     selected_channel_id: Mapped[str] = mapped_column(String(36), nullable=True)

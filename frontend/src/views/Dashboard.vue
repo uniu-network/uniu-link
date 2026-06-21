@@ -33,6 +33,33 @@
         </div>
       </UiCard>
 
+      <UiCard title="近24小时 API Key 调用">
+        <div v-if="apiKeyStats.length" class="overflow-x-auto thin-scrollbar">
+          <table class="w-full min-w-max text-left text-sm">
+            <thead class="border-b border-border text-xs uppercase tracking-wide text-muted-foreground">
+              <tr>
+                <th class="px-3 py-2 font-medium">API Key</th>
+                <th class="px-3 py-2 font-medium">请求数</th>
+                <th class="px-3 py-2 font-medium">错误数</th>
+                <th class="px-3 py-2 font-medium">总 Tokens</th>
+              </tr>
+            </thead>
+            <tbody class="divide-y divide-border">
+              <tr v-for="item in apiKeyStats" :key="item.from_apikey">
+                <td class="px-3 py-3">
+                  <p class="font-medium">{{ item.from_apikey_name || item.from_apikey || '-' }}</p>
+                  <code v-if="item.from_apikey" class="text-xs text-muted-foreground">{{ shortId(item.from_apikey) }}</code>
+                </td>
+                <td class="px-3 py-3">{{ formatNumber(item.request_count || 0) }}</td>
+                <td class="px-3 py-3" :class="item.error_count ? 'text-red-600 dark:text-red-400' : ''">{{ formatNumber(item.error_count || 0) }}</td>
+                <td class="px-3 py-3">{{ formatNumber(item.total_tokens || 0) }}</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <UiEmpty v-else title="暂无 API Key 调用数据" />
+      </UiCard>
+
       <UiCard title="渠道健康状态">
         <div v-if="stats.channel_health?.length" class="divide-y divide-border">
           <div v-for="ch in stats.channel_health" :key="ch.id" class="flex items-center justify-between gap-4 py-3">
@@ -90,9 +117,15 @@ const healthyChannels = computed(() =>
   (stats.value.channel_health || []).filter((c: any) => c.health_status === 'healthy').length
 )
 const totalChannels = computed(() => (stats.value.channel_health || []).length)
+const apiKeyStats = computed(() => stats.value.api_key_stats || [])
 
 function formatNumber(value: number) {
   return new Intl.NumberFormat('zh-CN').format(value || 0)
+}
+
+function shortId(value: string) {
+  if (!value) return ''
+  return value.length > 12 ? `${value.slice(0, 8)}...` : value
 }
 
 function formatHour(value: string) {

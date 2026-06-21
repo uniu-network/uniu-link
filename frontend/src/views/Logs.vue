@@ -7,6 +7,7 @@
           <option v-for="option in apiTypeOptions" :key="option.value" :value="option.value">{{ option.label }}</option>
         </select>
         <input v-model="filters.model" placeholder="模型名称" class="form-input w-40" />
+        <input v-model="filters.from_apikey" placeholder="API Key 名称/ID" class="form-input w-44" />
         <input v-model.number="filters.status" type="number" placeholder="状态码" class="form-input w-32" />
         <UiButton variant="primary" :loading="loading" @click="load">查询</UiButton>
       </div>
@@ -78,7 +79,7 @@ const loading = ref(true)
 const page = ref(1)
 const pageSize = ref(20)
 const total = ref(0)
-const filters = ref<{ api_type: string | null; model: string; status: number | null }>({ api_type: null, model: '', status: null })
+const filters = ref<{ api_type: string | null; model: string; from_apikey: string; status: number | null }>({ api_type: null, model: '', from_apikey: '', status: null })
 
 const drawerVisible = ref(false)
 const selectedLog = ref<any>(null)
@@ -91,6 +92,7 @@ const apiTypeOptions = [
 
 const basicInfo = computed(() => selectedLog.value ? [
   { label: 'Trace ID', value: selectedLog.value.trace_id },
+  { label: '调用密钥', value: formatApiKey(selectedLog.value) },
   { label: 'API类型', value: selectedLog.value.api_type },
   { label: '模型', value: selectedLog.value.model || '-' },
   { label: '渠道', value: selectedLog.value.selected_channel_name || '-' },
@@ -126,9 +128,31 @@ function openDetail(log: any) {
   drawerVisible.value = true
 }
 
+function shortId(value: string) {
+  if (!value) return ''
+  return value.length > 12 ? `${value.slice(0, 8)}...` : value
+}
+
+function formatApiKey(log: any) {
+  const name = log?.from_apikey_name || ''
+  const id = log?.from_apikey || ''
+  if (name && id) return `${name} (${id})`
+  return name || id || '-'
+}
+
+function renderApiKey(row: any) {
+  const name = row.from_apikey_name || ''
+  const id = row.from_apikey || ''
+  return h('div', { class: 'min-w-32 space-y-0.5' }, [
+    h('p', { class: 'font-medium' }, name || id || '-'),
+    id ? h('code', { class: 'text-xs text-muted-foreground' }, shortId(id)) : null,
+  ])
+}
+
 const columns = [
   { title: 'Trace ID', key: 'trace_id', render: (row: any) => h('code', { class: 'text-xs text-muted-foreground' }, row.trace_id.slice(0, 8) + '...') },
   { title: 'API类型', key: 'api_type', render: (row: any) => h(UiBadge, { variant: row.api_type === 'openai' ? 'success' : 'info' }, { default: () => row.api_type }) },
+  { title: '调用密钥', key: 'from_apikey_name', render: renderApiKey },
   { title: '模型', key: 'model' },
   { title: '思考', key: 'thinking_effort' },
   { title: '渠道', key: 'selected_channel_name' },
@@ -148,6 +172,7 @@ async function load() {
     const params: any = { page: page.value, page_size: pageSize.value }
     if (filters.value.api_type) params.api_type = filters.value.api_type
     if (filters.value.model) params.model = filters.value.model
+    if (filters.value.from_apikey) params.from_apikey = filters.value.from_apikey
     if (filters.value.status !== null && filters.value.status !== undefined) params.status = filters.value.status
     const res = await listLogs(params)
     logs.value = res.data || []

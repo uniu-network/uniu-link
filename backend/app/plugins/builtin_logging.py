@@ -41,6 +41,8 @@ class LoggingPlugin(PluginHook):
             log_entry = RequestLog(
                 trace_id=_limit(context.get("trace_id", ""), 64),
                 api_key_hash=key_hash,
+                from_apikey=_limit(context.get("from_apikey", ""), 36),
+                from_apikey_name=_limit(context.get("from_apikey_name", ""), 128),
                 api_type=_limit(context.get("api_type", ""), 16),
                 model=_limit(context.get("model", ""), 128),
                 selected_channel_id=_limit(context.get("channel_id", ""), 36),

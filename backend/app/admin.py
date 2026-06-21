@@ -44,6 +44,7 @@ async def playground_proxy(request: Request, background_tasks: BackgroundTasks):
 
     request.state.api_key_info = {
         "id": None,
+        "name": "Admin Playground",
         "key_hash": "admin_playground",
         "max_tokens": None,
         "used_tokens": 0,
@@ -365,6 +366,39 @@ async def get_dashboard_stats(db: AsyncSession = Depends(get_db)):
         for row in daily_result.all()
     ]
 
+    api_key_result = await db.execute(
+        select(
+            RequestLog.from_apikey.label("from_apikey"),
+            func.coalesce(func.max(RequestLog.from_apikey_name), "").label("from_apikey_name"),
+            func.count(RequestLog.id).label("request_count"),
+            func.count(RequestLog.id).filter(RequestLog.status_code >= 400).label("error_count"),
+            func.coalesce(func.sum(RequestLog.prompt_tokens), 0).label("prompt_tokens"),
+            func.coalesce(func.sum(RequestLog.completion_tokens), 0).label("completion_tokens"),
+            func.coalesce(func.sum(RequestLog.total_tokens), 0).label("total_tokens"),
+        )
+        .where(
+            and_(
+                RequestLog.created_at >= now - timedelta(hours=24),
+                RequestLog.from_apikey != "",
+            )
+        )
+        .group_by(RequestLog.from_apikey)
+        .order_by(func.count(RequestLog.id).desc())
+        .limit(10)
+    )
+    api_key_stats = [
+        {
+            "from_apikey": row.from_apikey,
+            "from_apikey_name": row.from_apikey_name or "",
+            "request_count": int(row.request_count or 0),
+            "error_count": int(row.error_count or 0),
+            "prompt_tokens": int(row.prompt_tokens or 0),
+            "completion_tokens": int(row.completion_tokens or 0),
+            "total_tokens": int(row.total_tokens or 0),
+        }
+        for row in api_key_result.all()
+    ]
+
     return success_response(detail_result={
         "total_requests": total_requests,
         "error_rate": error_rate,
@@ -386,6 +420,7 @@ async def get_dashboard_stats(db: AsyncSession = Depends(get_db)):
             "hourly": hourly_tokens,
             "daily": daily_tokens,
         },
+        "api_key_stats": api_key_stats,
     })
 
 @admin_router.get("/channels")
@@ -907,6 +942,7 @@ async def list_logs(
     api_type: Optional[str] = Query(None),
     model: Optional[str] = Query(None),
     channel_id: Optional[str] = Query(None),
+    from_apikey: Optional[str] = Query(None),
     status: Optional[int] = Query(None),
     from_date: Optional[str] = Query(None),
     to_date: Optional[str] = Query(None),
@@ -922,6 +958,14 @@ async def list_logs(
         conditions.append(RequestLog.model == model)
     if channel_id:
         conditions.append(RequestLog.selected_channel_id == channel_id)
+    if from_apikey:
+        pattern = f"%{from_apikey}%"
+        conditions.append(
+            or_(
+                RequestLog.from_apikey.ilike(pattern),
+                RequestLog.from_apikey_name.ilike(pattern),
+            )
+        )
     if status is not None:
         conditions.append(RequestLog.status_code == status)
     if from_date:
@@ -955,6 +999,8 @@ async def list_logs(
             {
                 "id": log.id,
                 "trace_id": log.trace_id,
+                "from_apikey": log.from_apikey,
+                "from_apikey_name": log.from_apikey_name,
                 "api_type": log.api_type,
                 "model": log.model,
                 "selected_channel_name": log.selected_channel_name,
