@@ -1232,24 +1232,26 @@ async def update_api_key(key_id: str, data: ApiKeyUpdate, db: AsyncSession = Dep
     if not k:
         raise HTTPException(status_code=404, detail="API key not found")
 
-    if data.name is not None:
+    update_fields = data.model_fields_set
+
+    if "name" in update_fields and data.name is not None:
         k.name = data.name
-    if data.is_active is not None:
+    if "is_active" in update_fields and data.is_active is not None:
         k.is_active = data.is_active
-    if data.expires_at is not None:
-        if data.expires_at == "" or data.expires_at.lower() == "never":
+    if "expires_at" in update_fields:
+        if not data.expires_at or data.expires_at.lower() == "never":
             k.expires_at = None
         else:
             try:
                 k.expires_at = datetime.fromisoformat(data.expires_at)
             except ValueError:
                 raise HTTPException(status_code=400, detail="Invalid expires_at format")
-    if data.max_tokens is not None:
-        k.max_tokens = data.max_tokens if data.max_tokens > 0 else None
-    if data.allowed_models is not None:
+    if "max_tokens" in update_fields:
+        k.max_tokens = data.max_tokens if data.max_tokens and data.max_tokens > 0 else None
+    if "allowed_models" in update_fields:
         k.allowed_models = json.dumps(data.allowed_models) if data.allowed_models else None
-    if data.rate_limit is not None:
-        k.rate_limit = data.rate_limit if data.rate_limit > 0 else None
+    if "rate_limit" in update_fields:
+        k.rate_limit = data.rate_limit if data.rate_limit and data.rate_limit > 0 else None
 
     db.add(k)
     await db.commit()

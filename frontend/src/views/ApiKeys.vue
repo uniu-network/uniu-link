@@ -116,10 +116,10 @@ function removeModel(m: string) { form.value.allowed_models = form.value.allowed
 async function submitForm() {
   const data: Record<string, any> = { name: form.value.name }
   data.expires_at = form.value.no_expiry ? '' : expiresAtLocal.value ? new Date(expiresAtLocal.value).toISOString() : ''
-  data.max_tokens = form.value.max_tokens > 0 ? form.value.max_tokens : null
+  data.max_tokens = form.value.max_tokens > 0 ? form.value.max_tokens : 0
   data.allowed_models = form.value.all_models ? [] : form.value.allowed_models
   if (!form.value.all_models && data.allowed_models.length === 0) return toast.warning('请至少选择一个可调用模型，或勾选“不限制”')
-  data.rate_limit = form.value.no_rate_limit ? null : form.value.rate_limit > 0 ? form.value.rate_limit : null
+  data.rate_limit = form.value.no_rate_limit ? 0 : form.value.rate_limit > 0 ? form.value.rate_limit : 0
   if (!form.value.no_rate_limit && !data.rate_limit) return toast.warning('请设置有效的频率限制值')
   try {
     submitting.value = true
