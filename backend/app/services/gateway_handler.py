@@ -94,6 +94,33 @@ def _merge_token_usage(current: dict[str, int], usage: dict[str, int]) -> None:
     )
     current["cache_tokens"] = max(current["cache_tokens"], usage.get("cache_tokens", 0))
 
+def _ensure_openai_stream_usage(provider_request: dict[str, Any], upstream_api_type: str) -> None:
+    if upstream_api_type != "openai" or provider_request.get("stream") is not True:
+        return
+
+    stream_options = provider_request.get("stream_options")
+    if isinstance(stream_options, dict):
+        stream_options["include_usage"] = True
+        provider_request["stream_options"] = stream_options
+        return
+
+    provider_request["stream_options"] = {"include_usage": True}
+
+async def _safe_increment_token_usage(
+    api_key_id: str | None,
+    token_count: int,
+    trace_id: str,
+) -> None:
+    if not api_key_id or token_count <= 0:
+        return
+    try:
+        await increment_token_usage(api_key_id, token_count)
+    except Exception as e:
+        logger.exception(
+            "Failed to increment API key token usage",
+            extra={"trace_id": trace_id, "api_key_id": api_key_id, "token_count": token_count, "error": str(e)[:200]},
+        )
+
 def _sse_payloads(chunk_data: str) -> list[dict[str, Any]]:
     payloads = []
     for event in chunk_data.strip().split("\n\n"):
@@ -590,8 +617,9 @@ async def handle_gateway_request(
         ),
     )
 
-    if api_key_id and token_usage.get("total_tokens", 0) > 0:
-        await increment_token_usage(api_key_id, token_usage["total_tokens"])
+    await _safe_increment_token_usage(
+        api_key_id, token_usage.get("total_tokens", 0), trace_id
+    )
 
     return JSONResponse(content=response, status_code=status_code)
 
@@ -731,6 +759,7 @@ async def build_upstream_request(
     provider_request = adapter.convert_request(normalized_body, upstream_api_type)
     if upstream_api_type == "claude" and _model_default_thinking_applies(model_config, request_body):
         _apply_claude_default_mode_override(provider_request, model_config)
+    _ensure_openai_stream_usage(provider_request, upstream_api_type)
     headers = merge_custom_headers(adapter.get_headers(channel.api_key), channel.custom_headers)
     url = adapter.get_url(channel.base_url, upstream_api_type)
 
@@ -902,8 +931,9 @@ async def stream_gateway_request(
                 output_content=_truncate("".join(stream_output_parts)),
                 **token_usage,
             )
-            if api_key_id and token_usage.get("total_tokens", 0) > 0:
-                await increment_token_usage(api_key_id, token_usage["total_tokens"])
+            await _safe_increment_token_usage(
+                api_key_id, token_usage.get("total_tokens", 0), trace_id
+            )
             return
 
         except Exception as e:

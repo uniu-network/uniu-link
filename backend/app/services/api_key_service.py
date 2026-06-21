@@ -67,10 +67,6 @@ async def verify_api_key(api_key: str) -> Optional[dict]:
         if api_key_obj.expires_at < datetime.now(api_key_obj.expires_at.tzinfo):
             return None
 
-    if api_key_obj.max_tokens and api_key_obj.max_tokens > 0:
-        if api_key_obj.used_tokens >= api_key_obj.max_tokens:
-            return None
-
     allowed_models = None
     if api_key_obj.allowed_models:
         try:
@@ -137,15 +133,20 @@ async def increment_token_usage(api_key_id: str, token_count: int) -> None:
         )
         await session.commit()
 
-    redis = await get_redis()
     async with AsyncSessionLocal() as session:
         result = await session.execute(
-            select(ApiKey.used_tokens).where(ApiKey.id == api_key_id)
+            select(ApiKey.key_hash).where(ApiKey.id == api_key_id)
         )
-        new_used = result.scalar_one_or_none()
+        key_hash = result.scalar_one_or_none()
 
-    if new_used is not None:
-        pass
+    if key_hash:
+        try:
+            await invalidate_api_key_cache(key_hash)
+        except Exception as e:
+            logger.warning(
+                "Failed to invalidate API key cache after token usage update",
+                extra={"api_key_id": api_key_id, "error": str(e)[:200]},
+            )
 
 async def invalidate_api_key_cache(key_hash: str) -> None:
     redis = await get_redis()
