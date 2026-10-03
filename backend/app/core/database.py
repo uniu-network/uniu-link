@@ -1,5 +1,9 @@
 from collections.abc import AsyncGenerator
+from pathlib import Path
 
+from alembic import command
+from alembic.config import Config
+from sqlalchemy.engine import Connection
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine, async_sessionmaker
 from sqlalchemy.orm import DeclarativeBase
 from app.core.config import settings
@@ -42,7 +46,15 @@ async def get_db() -> AsyncGenerator[AsyncSession, None]:
             await session.close()
 
 
-async def init_db():
+def _upgrade_schema(connection: Connection) -> None:
+    backend_dir = Path(__file__).resolve().parents[2]
+    config = Config(str(backend_dir / "alembic.ini"))
+    config.set_main_option("script_location", str(backend_dir / "alembic"))
+    config.attributes["connection"] = connection
+    command.upgrade(config, "head")
+
+
+async def init_db() -> None:
     async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
-    logger.info("Database tables created successfully")
+        await conn.run_sync(_upgrade_schema)
+    logger.info("Database migrations applied successfully")

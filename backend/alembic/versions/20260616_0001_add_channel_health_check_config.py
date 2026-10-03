@@ -1,7 +1,7 @@
 """add channel health check config
 
 Revision ID: 20260616_0001
-Revises:
+Revises: 20260530_0001
 Create Date: 2026-06-16 00:00:00.000000
 """
 
@@ -12,7 +12,7 @@ import sqlalchemy as sa
 
 
 revision: str = "20260616_0001"
-down_revision: Union[str, None] = None
+down_revision: Union[str, None] = "20260530_0001"
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 
