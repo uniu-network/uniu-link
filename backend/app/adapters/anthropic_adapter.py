@@ -1,6 +1,6 @@
 import json
 import time
-from app.adapters.base_adapter import BaseAdapter
+from app.adapters.base_adapter import BaseAdapter, build_upstream_url
 
 
 class AnthropicAdapter(BaseAdapter):
@@ -290,7 +290,7 @@ class AnthropicAdapter(BaseAdapter):
         }
 
     def get_url(self, base_url: str, api_type: str) -> str:
-        return f"{base_url.rstrip('/')}/v1/messages"
+        return build_upstream_url(base_url, "/v1/messages")
 
     async def convert_stream_chunk(self, chunk_data: str, api_type: str) -> str | None:
         if api_type == "claude":

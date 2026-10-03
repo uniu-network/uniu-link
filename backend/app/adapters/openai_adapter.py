@@ -1,5 +1,5 @@
 import json
-from app.adapters.base_adapter import BaseAdapter
+from app.adapters.base_adapter import BaseAdapter, build_upstream_url
 
 
 class OpenAIAdapter(BaseAdapter):
@@ -132,8 +132,8 @@ class OpenAIAdapter(BaseAdapter):
 
     def get_url(self, base_url: str, api_type: str) -> str:
         if api_type == "responses":
-            return f"{base_url.rstrip('/')}/v1/responses"
-        return f"{base_url.rstrip('/')}/v1/chat/completions"
+            return build_upstream_url(base_url, "/v1/responses")
+        return build_upstream_url(base_url, "/v1/chat/completions")
 
     async def convert_stream_chunk(self, chunk_data: str, api_type: str) -> str | None:
         if api_type in ("openai", "responses"):

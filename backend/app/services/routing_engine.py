@@ -13,7 +13,7 @@ from app.models.model_config import ModelConfig
 from app.models.model_channel_ref import ModelChannelRef
 from app.models.channel import Channel
 from app.services.health_checker import get_channel_health_status
-from app.services.circuit_breaker import is_circuit_open, should_allow_request
+from app.services.circuit_breaker import should_allow_request
 
 logger = get_logger(__name__)
 
@@ -51,6 +51,10 @@ class ChannelInfo:
         self.ref_type = ref_type
         self.inline_config = inline_config
         self.custom_headers = custom_headers or {}
+
+    @property
+    def circuit_key(self) -> str:
+        return self.channel_id or self.ref_id
 
 
 async def get_model_channels(model_name: str, session: AsyncSession) -> list[ChannelInfo]:
@@ -129,11 +133,9 @@ def _default_api_type_for_provider(provider: str) -> str:
 async def filter_healthy_channels(channels: list[ChannelInfo]) -> list[ChannelInfo]:
     healthy = []
     for ch in channels:
+        if not await should_allow_request(ch.circuit_key):
+            continue
         if ch.channel_id:
-            if await is_circuit_open(ch.channel_id):
-                continue
-            if not await should_allow_request(ch.channel_id):
-                continue
             health = await get_channel_health_status(ch.channel_id)
             if health == "unhealthy":
                 continue

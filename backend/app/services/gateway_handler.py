@@ -641,8 +641,7 @@ async def _call_upstream_channels(
                 channel, request_body, api_type, trace_id, api_key_hash, model_config
             )
 
-            if channel.channel_id:
-                await record_success(channel.channel_id)
+            await record_success(channel.circuit_key)
 
             return channel, response, status_code, channel_url
         except NoRetryError:
@@ -651,8 +650,7 @@ async def _call_upstream_channels(
             last_error = str(e)
             last_status_code = getattr(e, "status_code", 500)
 
-            if channel.channel_id:
-                await record_failure(channel.channel_id)
+            await record_failure(channel.circuit_key)
 
             error_decision = await plugin_engine.execute_hook(
                 "on_error", error=e, channel_info=channel,
@@ -873,8 +871,7 @@ async def stream_gateway_request(
                     if resp.status_code >= 500:
                         last_error = f"Upstream returned HTTP {resp.status_code}"
                         last_token_usage = token_usage
-                        if channel.channel_id:
-                            await record_failure(channel.channel_id)
+                        await record_failure(channel.circuit_key)
                         continue
 
                     if resp.status_code >= 400:
@@ -894,8 +891,7 @@ async def stream_gateway_request(
                             yield stream_error_event(400, error_message, api_type)
                             yield stream_done_marker(api_type)
                             return
-                        if channel.channel_id:
-                            await record_failure(channel.channel_id)
+                        await record_failure(channel.circuit_key)
                         last_error = f"Upstream returned HTTP {resp.status_code}: {error_message}"
                         last_status_code = resp.status_code
                         last_token_usage = token_usage
@@ -917,8 +913,7 @@ async def stream_gateway_request(
                     if not received_done:
                         yield stream_done_marker(api_type)
 
-            if channel.channel_id:
-                await record_success(channel.channel_id)
+            await record_success(channel.circuit_key)
             _finish_request_log(
                 log_context,
                 start_time,
@@ -942,8 +937,7 @@ async def stream_gateway_request(
             last_status_code = getattr(e, "status_code", 500)
 
             if data_sent:
-                if channel.channel_id:
-                    await record_failure(channel.channel_id)
+                await record_failure(channel.circuit_key)
                 logger.error(
                     f"Stream channel {channel.name} failed after data was sent, cannot fallback",
                     extra={"trace_id": trace_id, "error": str(e)[:200]}
@@ -974,8 +968,7 @@ async def stream_gateway_request(
                 yield stream_done_marker(api_type)
                 return
 
-            if channel.channel_id:
-                await record_failure(channel.channel_id)
+            await record_failure(channel.circuit_key)
             logger.warning(f"Stream channel {channel.name} failed: {e}")
             continue
 

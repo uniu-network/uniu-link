@@ -1,8 +1,29 @@
+import re
 from abc import ABC, abstractmethod
 from typing import AsyncGenerator
+from urllib.parse import urlsplit
 
 
 _PROTECTED_HEADERS = {"authorization", "api-key", "x-api-key"}
+_API_VERSION = re.compile(r"v\d+(?:\.\d+)*(?:(?:alpha|beta)\d*)?", re.IGNORECASE)
+
+
+def build_upstream_url(base_url: str, endpoint: str) -> str:
+    url = urlsplit(base_url.strip())
+    base = url.path.rstrip("/")
+    path = "/" + endpoint.strip("/")
+
+    if not base.endswith(path):
+        version, separator, resource = path[1:].partition("/")
+        if separator and _API_VERSION.fullmatch(version):
+            suffix = "/" + resource
+            # Keep an explicitly configured version, including full endpoint URLs.
+            version_base = base[:-len(suffix)] if base.endswith(suffix) else base
+            if _API_VERSION.fullmatch(version_base.rsplit("/", 1)[-1]):
+                base, path = version_base, suffix
+        base += path
+
+    return url._replace(path=base).geturl()
 
 
 def merge_custom_headers(headers: dict, custom_headers: dict | None) -> dict:
@@ -40,7 +61,7 @@ class BaseAdapter(ABC):
         return {"Authorization": f"Bearer {api_key}"}
 
     def get_url(self, base_url: str, api_type: str) -> str:
-        return f"{base_url.rstrip('/')}/v1/chat/completions"
+        return build_upstream_url(base_url, "/v1/chat/completions")
 
     @abstractmethod
     async def convert_stream_chunk(

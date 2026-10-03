@@ -20,8 +20,16 @@ from app.models.model_channel_ref import ModelChannelRef
 from app.models.request_log import RequestLog
 from app.models.plugin import Plugin as PluginModel
 from app.models.api_key import ApiKey
-from app.services.health_checker import get_channel_health_status
-from app.services.circuit_breaker import reset_circuit
+from app.services.health_checker import (
+    get_channel_health_status,
+    set_channel_health_status,
+)
+from app.services.channel_probe import (
+    build_models_url,
+    build_prompt_request,
+    extract_reply_text,
+)
+from app.services.circuit_breaker import reset_circuit, get_circuit_info
 from app.core.config import config_manager, CONFIG_META, SENSITIVE_KEYS
 from app.core.response import success_response, error_response
 from app.adapters.generic_adapter import get_adapter
@@ -58,6 +66,22 @@ async def playground_proxy(request: Request, background_tasks: BackgroundTasks):
 class ChannelTestRequest(BaseModel):
     model: str
     message: str = "Hi, please respond with a short greeting to confirm you are working."
+
+
+async def _record_test_health(channel_id: str, status: str) -> None:
+    try:
+        await set_channel_health_status(channel_id, status)
+    except Exception as exc:
+        logger.warning(
+            "Failed to update channel health after manual test",
+            extra={
+                "channel_id": channel_id,
+                "status": status,
+                "error": str(exc),
+                "trace_id": "admin_test_channel",
+            },
+        )
+
 
 DEFAULT_HEALTH_CHECK_PROMPT = "Hi, please respond with a short greeting to confirm you are working."
 HEALTH_CHECK_MODES = {"model_list", "prompt"}
@@ -192,7 +216,7 @@ async def _fetch_channel_upstream_models(channel: Channel) -> list[str]:
     headers = adapter.get_headers(api_key)
     headers = merge_custom_headers(headers, channel.custom_headers)
     api_type = normalize_channel_api_type(channel.api_type, channel.provider)
-    url = f"{channel.base_url.rstrip('/')}/v1/models"
+    url = build_models_url(channel.base_url)
 
     async with httpx.AsyncClient(timeout=channel.timeout or 30) as client:
         log_upstream_request(logger, "GET", url, trace_id="admin_sync_models", channel=channel.name)
@@ -271,9 +295,10 @@ async def get_dashboard_stats(db: AsyncSession = Depends(get_db)):
     channel_health = []
     for ch in channels:
         health = await get_channel_health_status(ch.id)
+        circuit_info = await get_circuit_info(ch.id)
         channel_health.append({
             "id": ch.id, "name": ch.name, "provider": ch.provider,
-            "health_status": health, "circuit_state": ch.circuit_state,
+            "health_status": health, "circuit_state": circuit_info["circuit_state"],
         })
     healthy_channel_count = sum(1 for ch in channel_health if ch["health_status"] == "healthy")
 
@@ -431,6 +456,7 @@ async def list_channels(db: AsyncSession = Depends(get_db)):
     channel_list = []
     for ch in channels:
         health = await get_channel_health_status(ch.id)
+        circuit_info = await get_circuit_info(ch.id)
         channel_list.append({
             "id": ch.id, "name": ch.name, "provider": ch.provider,
             "api_type": ch.api_type or _default_api_type_for_provider(ch.provider),
@@ -443,7 +469,9 @@ async def list_channels(db: AsyncSession = Depends(get_db)):
             "health_check_prompt": ch.health_check_prompt or DEFAULT_HEALTH_CHECK_PROMPT,
             "health_check_max_tokens": ch.health_check_max_tokens or 32,
             "health_status": health,
-            "circuit_state": ch.circuit_state,
+            "circuit_state": circuit_info["circuit_state"],
+            "fail_count": circuit_info["fail_count"],
+            "half_open_count": circuit_info["half_open_count"],
             "created_at": ch.created_at.isoformat() if ch.created_at else "",
             "updated_at": ch.updated_at.isoformat() if ch.updated_at else "",
         })
@@ -456,6 +484,7 @@ async def get_channel(channel_id: str, db: AsyncSession = Depends(get_db)):
     if not ch:
         raise HTTPException(status_code=404, detail="Channel not found")
     health = await get_channel_health_status(ch.id)
+    circuit_info = await get_circuit_info(ch.id)
     return success_response(detail_result={
         "id": ch.id, "name": ch.name, "provider": ch.provider,
         "api_type": ch.api_type or _default_api_type_for_provider(ch.provider),
@@ -468,7 +497,9 @@ async def get_channel(channel_id: str, db: AsyncSession = Depends(get_db)):
         "health_check_prompt": ch.health_check_prompt or DEFAULT_HEALTH_CHECK_PROMPT,
         "health_check_max_tokens": ch.health_check_max_tokens or 32,
         "health_status": health,
-        "circuit_state": ch.circuit_state,
+        "circuit_state": circuit_info["circuit_state"],
+        "fail_count": circuit_info["fail_count"],
+        "half_open_count": circuit_info["half_open_count"],
         "created_at": ch.created_at.isoformat() if ch.created_at else "",
         "updated_at": ch.updated_at.isoformat() if ch.updated_at else "",
     })
@@ -590,24 +621,7 @@ async def test_channel(channel_id: str, data: ChannelTestRequest, db: AsyncSessi
     adapter = get_adapter(ch.provider)
     timeout = ch.timeout or 30
 
-    if api_type == "claude":
-        request_body = {
-            "model": data.model,
-            "messages": [{"role": "user", "content": data.message}],
-            "max_tokens": 64,
-        }
-    elif api_type == "responses":
-        request_body = {
-            "model": data.model,
-            "input": data.message,
-            "max_output_tokens": 64,
-        }
-    else:
-        request_body = {
-            "model": data.model,
-            "messages": [{"role": "user", "content": data.message}],
-            "max_tokens": 64,
-        }
+    request_body = build_prompt_request(api_type, data.model, data.message, 64)
 
     upstream_api_type = api_type
     provider_request = adapter.convert_request(request_body, upstream_api_type)
@@ -624,6 +638,7 @@ async def test_channel(channel_id: str, data: ChannelTestRequest, db: AsyncSessi
             log_upstream_response(logger, "POST", url, resp.status_code, resp.text[:500], "admin_test_channel", ch.name)
 
         if resp.status_code >= 400:
+            await _record_test_health(ch.id, "unhealthy")
             error_message = resp.text[:500]
             try:
                 error_json = resp.json()
@@ -642,7 +657,8 @@ async def test_channel(channel_id: str, data: ChannelTestRequest, db: AsyncSessi
 
         response_body = resp.json()
         response = adapter.convert_response(response_body, upstream_api_type, provider_request)
-        reply_text = _extract_reply_text(response, api_type)
+        reply_text = extract_reply_text(response, api_type)
+        await _record_test_health(ch.id, "healthy")
 
         return success_response(detail_result={
             "success": True,
@@ -652,6 +668,7 @@ async def test_channel(channel_id: str, data: ChannelTestRequest, db: AsyncSessi
         })
 
     except Exception as e:
+        await _record_test_health(ch.id, "unhealthy")
         elapsed = (time.time() - start_time) * 1000
         return success_response(detail_result={
             "success": False,
@@ -661,30 +678,6 @@ async def test_channel(channel_id: str, data: ChannelTestRequest, db: AsyncSessi
             "status_code": getattr(e, "status_code", 500),
             "latency_ms": round(elapsed, 1),
         })
-
-def _extract_reply_text(response: dict, api_type: str) -> str:
-    if api_type == "claude":
-        content = response.get("content", [])
-        if isinstance(content, list):
-            return "".join(item.get("text", "") for item in content if isinstance(item, dict))
-        return str(content)
-    if api_type == "responses":
-        if isinstance(response.get("output_text"), str):
-            return response["output_text"]
-        output = response.get("output", [])
-        if isinstance(output, list):
-            for item in output:
-                if isinstance(item, dict):
-                    for part in item.get("content", []):
-                        if isinstance(part, dict):
-                            return part.get("text", part.get("output_text", ""))
-        return ""
-    choices = response.get("choices", [])
-    if choices:
-        choice = choices[0] if isinstance(choices[0], dict) else {}
-        message = choice.get("message", {})
-        return message.get("content", "")
-    return ""
 
 @admin_router.delete("/channels/{channel_id}")
 async def delete_channel(channel_id: str, db: AsyncSession = Depends(get_db)):
@@ -702,7 +695,23 @@ async def delete_channel(channel_id: str, db: AsyncSession = Depends(get_db)):
     await db.delete(ch)
     await db.commit()
 
+    await reset_circuit(channel_id)
+
     return success_response(detail_result={"message": "Channel deleted"})
+
+@admin_router.post("/channels/{channel_id}/reset-circuit")
+async def reset_channel_circuit(channel_id: str, db: AsyncSession = Depends(get_db)):
+    result = await db.execute(select(Channel).where(Channel.id == channel_id))
+    ch = result.scalar_one_or_none()
+    if not ch:
+        raise HTTPException(status_code=404, detail="Channel not found")
+    await reset_circuit(channel_id)
+    circuit_info = await get_circuit_info(channel_id)
+    return success_response(detail_result={
+        "id": channel_id,
+        "circuit_state": circuit_info["circuit_state"],
+        "message": "Circuit breaker reset",
+    })
 
 @admin_router.get("/models")
 async def list_models(db: AsyncSession = Depends(get_db)):
