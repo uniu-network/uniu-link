@@ -70,3 +70,4 @@ test.py
 
 config.yaml
 opencode.json
+.opencode/*

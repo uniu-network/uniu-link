@@ -1,0 +1,10 @@
+# From backend/: conda env create --prefix ./.venv --file environment.yml
+name: uniulink
+channels:
+  - conda-forge
+  - nodefaults
+dependencies:
+  - python=3.11
+  - pip
+  - pip:
+      - -r requirements.txt
