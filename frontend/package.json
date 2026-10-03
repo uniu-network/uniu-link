@@ -6,14 +6,17 @@
   "scripts": {
     "dev": "vite --port 3000",
     "build": "vue-tsc -b && vite build",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "typecheck": "vue-tsc --noEmit",
+    "test:e2e": "playwright test"
   },
   "dependencies": {
+    "@fluentui/web-components": "2.6.1",
     "@vueuse/core": "^11.1.0",
     "apexcharts": "^5.13.0",
     "axios": "^1.7.7",
-    "crypto-js": "^4.2.0",
     "clsx": "^2.1.1",
+    "crypto-js": "^4.2.0",
     "echarts": "^5.5.1",
     "katex": "^0.17.0",
     "lucide-vue-next": "^0.453.0",
@@ -28,6 +31,7 @@
     "vue3-apexcharts": "^1.11.1"
   },
   "devDependencies": {
+    "@playwright/test": "^1.63.0",
     "@types/crypto-js": "^4.2.2",
     "@types/node": "^22.8.0",
     "@vitejs/plugin-vue": "^5.1.4",

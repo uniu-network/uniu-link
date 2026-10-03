@@ -1,9 +1,19 @@
 <template>
   <div class="space-y-3">
     <div v-if="items.length" class="space-y-2">
-      <div v-for="(item, index) in items" :key="index" class="grid gap-2 sm:grid-cols-[1fr_1fr_auto]">
-        <input v-model="item.key" placeholder="Header 名称" class="h-8 rounded-md border border-input bg-background px-2 text-sm outline-none focus:ring-2 focus:ring-ring" />
-        <input v-model="item.value" placeholder="Header 值" class="h-8 rounded-md border border-input bg-background px-2 text-sm outline-none focus:ring-2 focus:ring-ring" />
+      <div v-for="(item, index) in items" :key="index" class="header-fields">
+        <UiInput
+          v-model="item.key"
+          :aria-label="`第 ${index + 1} 个请求头名称`"
+          placeholder="Header 名称"
+          class="w-full"
+        />
+        <UiInput
+          v-model="item.value"
+          :aria-label="`第 ${index + 1} 个请求头值`"
+          placeholder="Header 值"
+          class="w-full"
+        />
         <UiButton variant="link" size="sm" @click="remove(index)">删除</UiButton>
       </div>
     </div>
@@ -19,6 +29,7 @@
 </template>
 
 <script setup lang="ts">
+import UiInput from '@/components/ui/UiInput.vue'
 import { computed } from 'vue'
 import UiButton from '@/components/ui/UiButton.vue'
 

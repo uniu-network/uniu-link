@@ -1,13 +1,13 @@
 import { inject, reactive, type InjectionKey } from 'vue'
 
-type ToastType = 'success' | 'error' | 'warning' | 'info'
-
+export type MessageType = 'success' | 'error' | 'warning'
+type ToastType = MessageType | 'info'
 export interface ToastItem {
   id: number
-  type: ToastType
+  type: MessageType
   message: string
+  duration?: number
 }
-
 export interface ConfirmOptions {
   title: string
   content: string
@@ -15,79 +15,72 @@ export interface ConfirmOptions {
   negativeText?: string
   variant?: 'default' | 'danger'
 }
-
 export interface FeedbackContext {
   toasts: ToastItem[]
-  confirmState: {
-    open: boolean
-    options: ConfirmOptions
-    resolve?: (value: boolean) => void
-  }
-  toast: Record<ToastType, (message: string) => void>
+  confirmState: { open: boolean; options: ConfirmOptions }
+  toast: Record<ToastType, (message: string, duration?: number) => void>
+  notify: (message: string, type?: MessageType, duration?: number) => number
   confirm: (options: ConfirmOptions) => Promise<boolean>
   closeToast: (id: number) => void
   resolveConfirm: (value: boolean) => void
 }
-
 export const feedbackKey: InjectionKey<FeedbackContext> = Symbol('feedback')
-
 export function createFeedbackContext(): FeedbackContext {
-  let toastId = 0
+  let nextId = 0
   const toasts = reactive<ToastItem[]>([])
   const confirmState = reactive({
     open: false,
     options: { title: '', content: '' } as ConfirmOptions,
-    resolve: undefined as undefined | ((value: boolean) => void),
   })
-
+  const queue: { options: ConfirmOptions; resolve: (value: boolean) => void }[] = []
+  function notify(message: string, type: MessageType = 'success', duration?: number) {
+    const id = ++nextId
+    toasts.push({ id, type, message, duration })
+    if (toasts.length > 5) toasts.splice(0, toasts.length - 5)
+    return id
+  }
   function closeToast(id: number) {
-    const index = toasts.findIndex((toast) => toast.id === id)
-    if (index >= 0) toasts.splice(index, 1)
+    const index = toasts.findIndex((item) => item.id === id)
+    if (index !== -1) toasts.splice(index, 1)
   }
-
-  function pushToast(type: ToastType, message: string) {
-    const id = ++toastId
-    toasts.push({ id, type, message })
-    window.setTimeout(() => closeToast(id), 3200)
-  }
-
-  function confirm(options: ConfirmOptions) {
+  function showNext() {
+    if (!queue.length) return
+    confirmState.options = queue[0].options
     confirmState.open = true
-    confirmState.options = options
-    return new Promise<boolean>((resolve) => {
-      confirmState.resolve = resolve
+  }
+  function confirm(options: ConfirmOptions): Promise<boolean> {
+    return new Promise((resolve) => {
+      queue.push({ options, resolve })
+      if (queue.length === 1) showNext()
     })
   }
-
   function resolveConfirm(value: boolean) {
+    if (!confirmState.open) return
     confirmState.open = false
-    confirmState.resolve?.(value)
-    confirmState.resolve = undefined
+    queue.shift()?.resolve(value)
+    // Allow the old dialog to unmount and restore focus before displaying the next one.
+    queueMicrotask(showNext)
   }
-
   return {
     toasts,
     confirmState,
-    toast: {
-      success: (message) => pushToast('success', message),
-      error: (message) => pushToast('error', message),
-      warning: (message) => pushToast('warning', message),
-      info: (message) => pushToast('info', message),
-    },
+    notify,
     confirm,
     closeToast,
     resolveConfirm,
+    toast: {
+      success: (m, d) => notify(m, 'success', d),
+      error: (m, d) => notify(m, 'error', d),
+      warning: (m, d) => notify(m, 'warning', d),
+      info: (m, d) => notify(m, 'success', d),
+    },
   }
 }
-
+export const feedback = createFeedbackContext()
+export const notify = feedback.notify
 export function useToast() {
-  const context = inject(feedbackKey)
-  if (!context) throw new Error('Feedback provider is missing')
-  return context.toast
+  return inject(feedbackKey, feedback).toast
 }
-
 export function useConfirm() {
-  const context = inject(feedbackKey)
-  if (!context) throw new Error('Feedback provider is missing')
-  return context.confirm
+  return inject(feedbackKey, feedback).confirm
 }

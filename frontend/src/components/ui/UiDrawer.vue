@@ -1,21 +1,16 @@
 <template>
-  <Teleport to="body">
-    <Transition name="modal-fade">
-      <div v-if="open" class="fixed inset-0 z-50 bg-black/45 backdrop-blur-sm" @click.self="$emit('update:open', false)">
-        <aside class="ml-auto flex h-full max-w-full flex-col border-l border-border bg-card shadow-vercel animate-drawer-in" :style="{ width }">
-          <header class="flex items-center justify-between border-b border-border px-5 py-4">
-            <h3 class="text-sm font-semibold">{{ title }}</h3>
-            <button class="rounded-md p-1 text-muted-foreground hover:bg-accent hover:text-foreground" @click="$emit('update:open', false)">x</button>
-          </header>
-          <div class="flex-1 overflow-auto p-5 thin-scrollbar"><slot /></div>
-          <footer v-if="$slots.footer" class="border-t border-border px-5 py-4"><slot name="footer" /></footer>
-        </aside>
-      </div>
-    </Transition>
-  </Teleport>
+  <UiModal v-bind="$props" @update:open="$emit('update:open', $event)" @save="$emit('save')"
+    ><slot /><template v-if="$slots.footer" #footer><slot name="footer" /></template
+  ></UiModal>
 </template>
-
 <script setup lang="ts">
-withDefaults(defineProps<{ open: boolean; title?: string; width?: string }>(), { width: '560px' })
-defineEmits<{ (e: 'update:open', value: boolean): void }>()
+import UiModal from './UiModal.vue'
+defineProps<{
+  open: boolean
+  title?: string
+  width?: string
+  busy?: boolean
+  beforeClose?: () => Promise<boolean>
+}>()
+defineEmits<{ 'update:open': [value: boolean]; save: [] }>()
 </script>

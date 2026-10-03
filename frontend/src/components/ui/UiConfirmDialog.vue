@@ -1,10 +1,20 @@
 <template>
-  <UiModal :open="feedback.confirmState.open" :title="feedback.confirmState.options.title" width="420px" @update:open="feedback.resolveConfirm(false)">
+  <UiModal
+    :open="feedback.confirmState.open"
+    :title="feedback.confirmState.options.title"
+    width="420px"
+    @update:open="feedback.resolveConfirm(false)"
+  >
     <p class="text-sm text-muted-foreground">{{ feedback.confirmState.options.content }}</p>
     <template #footer>
       <div class="flex justify-end gap-2">
-        <UiButton @click="feedback.resolveConfirm(false)">{{ feedback.confirmState.options.negativeText || '取消' }}</UiButton>
-        <UiButton :variant="feedback.confirmState.options.variant === 'danger' ? 'danger' : 'primary'" @click="feedback.resolveConfirm(true)">
+        <UiButton @click="feedback.resolveConfirm(false)">{{
+          feedback.confirmState.options.negativeText || '取消'
+        }}</UiButton>
+        <UiButton
+          :variant="feedback.confirmState.options.variant === 'danger' ? 'danger' : 'primary'"
+          @click="feedback.resolveConfirm(true)"
+        >
           {{ feedback.confirmState.options.positiveText || '确定' }}
         </UiButton>
       </div>

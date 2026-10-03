@@ -1,41 +1,49 @@
 <template>
-  <div class="space-y-6">
-    <div class="flex justify-end">
-      <UiButton variant="primary" @click="openCreate">+ 新建插件</UiButton>
-    </div>
+  <div class="page-stack">
+    <PageHeader title="插件管理" description="管理请求生命周期中的扩展插件。"
+      ><UiButton :loading="loading" @click="load"><NavIcon name="refresh" />刷新</UiButton
+      ><UiButton variant="primary" @click="openCreate"
+        ><NavIcon name="plus" />新建插件</UiButton
+      ></PageHeader
+    >
 
-    <UiSpinner :show="loading">
+    <ListState :error="loadError" @retry="load" />
+    <UiSpinner v-if="!loadError" :show="loading">
       <UiDataTable :columns="columns" :data="plugins" />
     </UiSpinner>
 
-    <UiModal v-model:open="dialogVisible" :title="isEditing ? '编辑插件' : '新建插件'" width="600px">
+    <UiModal
+      v-model:open="dialogVisible"
+      :busy="submitting"
+      :before-close="beforeClose"
+      @save="submitForm"
+      :title="isEditing ? '编辑插件' : '新建插件'"
+      width="600px"
+    >
       <div class="space-y-4">
-        <label class="block space-y-2 text-sm font-medium">
-          <span>名称</span>
-          <input v-model="form.name" placeholder="请输入插件名称" class="form-input" />
-        </label>
-        <label class="block space-y-2 text-sm font-medium">
-          <span>钩子类型</span>
-          <select v-model="form.hook_type" class="form-input">
-            <option v-for="option in hookTypeOptions" :key="option.value" :value="option.value">{{ option.label }}</option>
-          </select>
-        </label>
-        <label class="block space-y-2 text-sm font-medium">
-          <span>模块路径</span>
-          <input v-model="form.module_path" placeholder="app.plugins.builtin_logging.LoggingPlugin" class="form-input" />
-        </label>
-        <label class="block space-y-2 text-sm font-medium">
-          <span>优先级</span>
-          <input v-model.number="form.priority" type="number" class="form-input" />
-        </label>
-        <label class="block space-y-2 text-sm font-medium">
-          <span>配置 (JSON)</span>
-          <textarea v-model="form.config_json" rows="4" placeholder="{}" class="form-input min-h-24 py-2" />
-        </label>
+        <UiField label="名称">
+          <UiInput v-model="form.name" placeholder="请输入插件名称" class="w-full" />
+        </UiField>
+        <UiField label="钩子类型">
+          <UiSelect v-model="form.hook_type" :options="hookTypeOptions" class="w-full" />
+        </UiField>
+        <UiField label="模块路径">
+          <UiInput
+            v-model="form.module_path"
+            placeholder="app.plugins.builtin_logging.LoggingPlugin"
+            class="w-full"
+          />
+        </UiField>
+        <UiField label="优先级">
+          <UiInput v-model.number="form.priority" type="number" class="w-full" />
+        </UiField>
+        <UiField label="配置 (JSON)">
+          <UiTextarea v-model="form.config_json" rows="4" placeholder="{}" class="w-full" />
+        </UiField>
       </div>
       <template #footer>
         <div class="flex justify-end gap-2">
-          <UiButton @click="dialogVisible = false">取消</UiButton>
+          <UiButton @click="closeEditor">取消</UiButton>
           <UiButton variant="primary" :loading="submitting" @click="submitForm">保存</UiButton>
         </div>
       </template>
@@ -44,26 +52,46 @@
 </template>
 
 <script setup lang="ts">
+import { useUnsavedForm } from '@/composables/useUnsavedChanges'
+import PageHeader from '@/components/PageHeader.vue'
+import ListState from '@/components/ListState.vue'
+import NavIcon from '@/components/NavIcon.vue'
+
+import UiField from '@/components/ui/UiField.vue'
+import UiInput from '@/components/ui/UiInput.vue'
+import UiTextarea from '@/components/ui/UiTextarea.vue'
 import { ref, onMounted, h } from 'vue'
 import { listPlugins, createPlugin, updatePlugin, deletePlugin, togglePlugin } from '@/api/plugins'
 import { useConfirm, useToast } from '@/composables/useFeedback'
 import UiBadge from '@/components/ui/UiBadge.vue'
 import UiButton from '@/components/ui/UiButton.vue'
 import UiDataTable from '@/components/ui/UiDataTable.vue'
+import UiDropdown from '@/components/ui/UiDropdown.vue'
+import UiDropdownItem from '@/components/ui/UiDropdownItem.vue'
 import UiModal from '@/components/ui/UiModal.vue'
+import UiSelect from '@/components/ui/UiSelect.vue'
 import UiSpinner from '@/components/ui/UiSpinner.vue'
+import { Pencil, Trash2, Power } from 'lucide-vue-next'
 
 const toast = useToast()
 const confirm = useConfirm()
 
 const plugins = ref<any[]>([])
 const loading = ref(true)
+const loadError = ref('')
 const dialogVisible = ref(false)
 const isEditing = ref(false)
 const submitting = ref(false)
 const deletingId = ref('')
 const togglingId = ref('')
-const form = ref<any>({ name: '', hook_type: 'pre_route', module_path: '', priority: 0, enabled: true, config_json: '{}' })
+const form = ref<any>({
+  name: '',
+  hook_type: 'pre_route',
+  module_path: '',
+  priority: 0,
+  enabled: true,
+  config_json: '{}',
+})
 
 const hookTypeOptions = [
   { label: 'pre_route', value: 'pre_route' },
@@ -89,33 +117,61 @@ const columns = [
     title: '状态',
     key: 'enabled',
     render(row: any) {
-      return h(UiButton, {
-        size: 'sm',
-        variant: row.enabled ? 'primary' : 'default',
-        loading: togglingId.value === row.id,
-        onClick: () => toggle(row.id),
-      }, { default: () => togglingId.value === row.id ? '处理中' : (row.enabled ? '启用' : '禁用') })
+      return h(
+        UiButton,
+        {
+          size: 'sm',
+          variant: row.enabled ? 'primary' : 'default',
+          loading: togglingId.value === row.id,
+          onClick: () => toggle(row.id),
+        },
+        { default: () => (togglingId.value === row.id ? '处理中' : row.enabled ? '启用' : '禁用') }
+      )
     },
   },
   {
     title: '操作',
     key: 'actions',
     render(row: any) {
-      return h('div', { class: 'flex gap-2' }, [
-        h(UiButton, { variant: 'link', size: 'sm', onClick: () => openEdit(row) }, { default: () => '编辑' }),
-        h(UiButton, { variant: 'link', size: 'sm', loading: deletingId.value === row.id, onClick: () => deleteItem(row.id) }, { default: () => deletingId.value === row.id ? '删除中' : '删除' }),
-      ])
+      return h(UiDropdown, null, {
+        default: () => [
+          h(
+            UiDropdownItem,
+            { icon: Power, loading: togglingId.value === row.id, onClick: () => toggle(row.id) },
+            {
+              default: () =>
+                togglingId.value === row.id ? '处理中' : row.enabled ? '禁用' : '启用',
+            }
+          ),
+          h(
+            UiDropdownItem,
+            { icon: Pencil, onClick: () => openEdit(row) },
+            { default: () => '编辑' }
+          ),
+          h(
+            UiDropdownItem,
+            {
+              icon: Trash2,
+              variant: 'danger',
+              loading: deletingId.value === row.id,
+              onClick: () => deleteItem(row.id),
+            },
+            { default: () => (deletingId.value === row.id ? '删除中' : '删除') }
+          ),
+        ],
+      })
     },
   },
 ]
 
 async function load() {
   loading.value = true
+  loadError.value = ''
   try {
     const res = await listPlugins()
     plugins.value = res.data || []
   } catch (e) {
-    console.error(e)
+    loadError.value = '插件管理加载失败，请检查网络后重试'
   } finally {
     loading.value = false
   }
@@ -123,7 +179,14 @@ async function load() {
 
 function openCreate() {
   isEditing.value = false
-  form.value = { name: '', hook_type: 'pre_route', module_path: '', priority: 0, enabled: true, config_json: '{}' }
+  form.value = {
+    name: '',
+    hook_type: 'pre_route',
+    module_path: '',
+    priority: 0,
+    enabled: true,
+    config_json: '{}',
+  }
   dialogVisible.value = true
 }
 
@@ -147,24 +210,32 @@ async function submitForm() {
     submitting.value = true
     if (isEditing.value) await updatePlugin(data.id, data)
     else await createPlugin(data)
+    toast.success('保存成功')
     dialogVisible.value = false
     await load()
   } catch (e) {
-    console.error(e)
+    toast.error('操作失败，请检查配置后重试')
   } finally {
     submitting.value = false
   }
 }
 
 async function deleteItem(id: string) {
-  const ok = await confirm({ title: '确认删除', content: '确定删除该插件吗？', positiveText: '确定', negativeText: '取消', variant: 'danger' })
+  const ok = await confirm({
+    title: '确认删除',
+    content: '确定删除该插件吗？',
+    positiveText: '删除',
+    negativeText: '取消',
+    variant: 'danger',
+  })
   if (!ok) return
   deletingId.value = id
   try {
     await deletePlugin(id)
+    toast.success('插件已删除')
     await load()
   } catch (e) {
-    console.error(e)
+    toast.error('操作失败，请检查配置后重试')
   } finally {
     deletingId.value = ''
   }
@@ -174,13 +245,16 @@ async function toggle(id: string) {
   try {
     togglingId.value = id
     await togglePlugin(id)
+    toast.success('插件状态已更新')
     await load()
   } catch (e) {
-    console.error(e)
+    toast.error('操作失败，请检查配置后重试')
   } finally {
     togglingId.value = ''
   }
 }
+
+const { beforeClose, closeEditor } = useUnsavedForm(dialogVisible, () => form.value, submitting)
 
 onMounted(load)
 </script>

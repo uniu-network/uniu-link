@@ -1,104 +1,137 @@
 <template>
-  <div class="min-h-screen bg-background text-foreground">
-    <aside class="fixed inset-y-0 left-0 z-40 hidden w-64 border-r border-border bg-card/80 backdrop-blur-xl lg:flex lg:flex-col">
-      <div class="flex h-16 items-center gap-3 border-b border-border px-5">
-        <div class="flex h-9 w-9 items-center justify-center rounded-xl border border-border bg-foreground text-background shadow-sm">
-          <Zap class="h-5 w-5" />
+  <div class="app-layout" :class="{ 'sidebar-collapsed': collapsed }">
+    <Transition name="sidebar-scrim"
+      ><div
+        v-if="isNarrow && !collapsed"
+        class="sidebar-scrim"
+        aria-hidden="true"
+        @click="collapsed = true"
+    /></Transition>
+    <aside class="sidebar" aria-label="管理侧边栏">
+      <div class="sidebar-brand">
+        <div class="sidebar-toggle">
+          <fluent-button
+            id="sidebar-toggle"
+            appearance="stealth"
+            :aria-label="collapsed ? '展开侧边栏' : '收起侧边栏'"
+            :title="collapsed ? '展开侧边栏' : '收起侧边栏'"
+            :aria-expanded="!collapsed"
+            aria-controls="admin-navigation"
+            @click="collapsed = !collapsed"
+            ><NavIcon name="menu" :size="18"
+          /></fluent-button>
         </div>
-        <div>
-          <p class="text-sm font-semibold tracking-tight">UniuLink</p>
-          <p class="text-xs text-muted-foreground">AI Gateway</p>
+        <div class="brand-mark"><NavIcon name="gateway" :size="30" /></div>
+        <div class="brand-copy" :aria-hidden="collapsed">
+          <strong>UniuLink</strong><span>AI 网关管理后台</span>
         </div>
       </div>
-
-      <nav class="flex-1 space-y-1 overflow-auto p-3 thin-scrollbar">
-        <button
+      <nav id="admin-navigation" class="navigation" aria-label="管理导航">
+        <RouterLink
           v-for="item in menuItems"
-          :key="item.key"
-          class="flex w-full items-center gap-3 rounded-lg px-3 py-2 text-left text-sm transition-all duration-150 hover:bg-accent"
-          :class="activeKey === item.key ? 'bg-foreground text-background shadow-sm hover:bg-foreground' : 'text-muted-foreground hover:text-foreground'"
-          @click="router.push(item.key)"
+          :key="item.path"
+          :to="item.path"
+          class="navigation-item"
+          :class="{ 'navigation-item-selected': selected(item.path) }"
+          :aria-current="selected(item.path) ? 'page' : undefined"
+          :aria-label="item.label"
+          :title="collapsed ? item.label : undefined"
+          @click="navigated"
+          ><NavIcon :name="item.icon" /><span class="navigation-label" :aria-hidden="collapsed">{{
+            item.label
+          }}</span></RouterLink
         >
-          <component :is="item.icon" class="h-4 w-4" />
-          <span>{{ item.label }}</span>
-        </button>
       </nav>
-
-      <div class="space-y-2 border-t border-border p-3">
-        <UiButton variant="ghost" block @click="toggleTheme">
-          <Sun v-if="isDark" class="h-4 w-4" />
-          <Moon v-else class="h-4 w-4" />
-          {{ isDark ? '浅色模式' : '深色模式' }}
-        </UiButton>
-        <UiButton variant="ghost" block @click="logout">
-          <LogOut class="h-4 w-4" />
-          退出登录
-        </UiButton>
+      <div class="sidebar-footer">
+        <div class="sidebar-action"><ThemeToggle :collapsed="collapsed" /></div>
+        <div
+          class="sidebar-account"
+          role="group"
+          :aria-label="collapsed ? '管理员，系统管理权限' : undefined"
+          :title="collapsed ? '管理员 · 系统管理权限' : undefined"
+        >
+          <span class="sidebar-avatar" aria-hidden="true"><NavIcon name="person" /></span>
+          <span class="account-copy" :aria-hidden="collapsed">
+            <strong>管理员</strong><span>系统管理权限</span>
+          </span>
+        </div>
+        <div class="sidebar-action">
+          <fluent-button
+            appearance="stealth"
+            :disabled="signingOut"
+            aria-label="退出登录"
+            title="退出登录"
+            @click="logout"
+            ><span class="sidebar-action-content"
+              ><NavIcon name="logout" /><span class="sidebar-action-label" :aria-hidden="collapsed"
+                >退出登录</span
+              ></span
+            ></fluent-button
+          >
+        </div>
       </div>
     </aside>
-
-    <div class="lg:pl-64">
-      <header class="sticky top-0 z-30 flex h-16 items-center justify-between border-b border-border bg-background/80 px-4 backdrop-blur-xl lg:px-8">
-        <div>
-          <h1 class="text-lg font-semibold tracking-tight">{{ route.meta?.title || 'UniuLink' }}</h1>
-        </div>
-        <div class="flex items-center gap-2 lg:hidden">
-          <UiButton variant="ghost" size="icon" @click="toggleTheme">
-            <Sun v-if="isDark" class="h-4 w-4" />
-            <Moon v-else class="h-4 w-4" />
-          </UiButton>
-          <UiButton variant="ghost" size="icon" @click="logout"><LogOut class="h-4 w-4" /></UiButton>
-        </div>
-      </header>
-
-      <main class="mx-auto w-full max-w-7xl p-4 lg:p-8">
-        <slot />
-      </main>
-    </div>
+    <main id="main" class="main-content" :inert="isNarrow && !collapsed"><slot /></main>
   </div>
 </template>
-
 <script setup lang="ts">
-import { computed } from 'vue'
+import { onBeforeUnmount, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import {
-  LayoutDashboard,
-  Server,
-  Cpu,
-  FileText,
-  Puzzle,
-  LogOut,
-  Zap,
-  MessageSquareText,
-  KeyRound,
-  Settings,
-  Sun,
-  Moon,
-} from 'lucide-vue-next'
 import { useAuthStore } from '@/stores/auth'
-import { useTheme } from '@/composables/useTheme'
-import UiButton from '@/components/ui/UiButton.vue'
-
+import { approveNextNavigation, confirmUnsavedChanges } from '@/composables/useUnsavedChanges'
+import NavIcon from './NavIcon.vue'
+import ThemeToggle from './ThemeToggle.vue'
 const route = useRoute()
 const router = useRouter()
-const authStore = useAuthStore()
-const { isDark, toggleTheme } = useTheme()
-
-const activeKey = computed(() => route.path)
-
+const auth = useAuthStore()
+const screen = window.matchMedia('(max-width: 700px)')
+const isNarrow = ref(screen.matches)
+const collapsed = ref(screen.matches)
+const signingOut = ref(false)
 const menuItems = [
-  { label: '仪表盘', key: '/', icon: LayoutDashboard },
-  { label: '渠道管理', key: '/channels', icon: Server },
-  { label: '模型管理', key: '/models', icon: Cpu },
-  { label: '演练场', key: '/playground', icon: MessageSquareText },
-  { label: '请求日志', key: '/logs', icon: FileText },
-  { label: 'API 密钥', key: '/api-keys', icon: KeyRound },
-  { label: '插件管理', key: '/plugins', icon: Puzzle },
-  { label: '系统配置', key: '/config', icon: Settings },
+  { path: '/', label: '仪表盘', icon: 'dashboard' },
+  { path: '/channels', label: '渠道管理', icon: 'server' },
+  { path: '/models', label: '模型管理', icon: 'model' },
+  { path: '/playground', label: '演练场', icon: 'comment' },
+  { path: '/logs', label: '请求日志', icon: 'document' },
+  { path: '/api-keys', label: 'API 密钥', icon: 'key' },
+  { path: '/plugins', label: '插件管理', icon: 'plugin' },
+  { path: '/config', label: '系统配置', icon: 'settings' },
 ]
-
-function logout() {
-  authStore.logout()
-  router.push('/login')
+function selected(path: string) {
+  return path === '/'
+    ? route.path === '/'
+    : route.path === path || route.path.startsWith(path + '/')
+}
+function navigated() {
+  if (isNarrow.value) collapsed.value = true
+}
+function resized(event: MediaQueryListEvent) {
+  isNarrow.value = event.matches
+  collapsed.value = event.matches
+}
+function escaped(event: KeyboardEvent) {
+  if (event.key === 'Escape' && isNarrow.value && !collapsed.value) {
+    collapsed.value = true
+    document.getElementById('sidebar-toggle')?.focus()
+  }
+}
+screen.addEventListener('change', resized)
+window.addEventListener('keydown', escaped)
+onBeforeUnmount(() => {
+  screen.removeEventListener('change', resized)
+  window.removeEventListener('keydown', escaped)
+})
+async function logout() {
+  if (signingOut.value) return
+  signingOut.value = true
+  try {
+    if (!(await confirmUnsavedChanges())) return
+    approveNextNavigation()
+    auth.logout()
+    await router.push('/login')
+  } finally {
+    signingOut.value = false
+  }
 }
 </script>

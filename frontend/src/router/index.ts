@@ -1,4 +1,5 @@
 import { createRouter, createWebHistory } from 'vue-router'
+import { guardUnsavedChanges, clearNavigationApproval } from '@/composables/useUnsavedChanges'
 import { useAuthStore } from '@/stores/auth'
 
 const routes = [
@@ -62,7 +63,8 @@ const router = createRouter({
   routes,
 })
 
-router.beforeEach((to, from, next) => {
+router.beforeEach(async (to, from, next) => {
+  if (to.path !== from.path && !(await guardUnsavedChanges())) return next(false)
   const authStore = useAuthStore()
   if (to.meta.requiresAuth && !authStore.isAuthenticated) {
     next('/login')
@@ -72,5 +74,8 @@ router.beforeEach((to, from, next) => {
     next()
   }
 })
+
+router.afterEach(clearNavigationApproval)
+router.onError(clearNavigationApproval)
 
 export default router
