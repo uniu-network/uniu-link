@@ -168,6 +168,7 @@ APP_ENV=development .venv/bin/python -m uvicorn app.main:app --host 127.0.0.1 --
 - YAML 持久化写入规范字段名，而读取时短别名会覆盖同名规范字段；已有短别名可能使重启后的值与刚更新的值不同。写入失败目前被忽略，界面显示成功不代表落盘成功，尤其是只读挂载。
 - Docker 中后端位于 `/app/app`，上述路径计算使配置位于 `/config.yaml`、静态文件位于 `/frontend/dist`；Compose 的配置挂载是 `./config.yaml:/config.yaml:ro`。README 所写 `/app/config.yaml` 与实际路径不一致，排查部署时以代码及 Compose 为准。
 - Docker 保留 Node 运行时供 `custom_js` 路由使用，并以单 Uvicorn worker 运行；每个应用进程都会启动健康检查循环，调整 worker 数量时要考虑重复后台任务。
+- Docker 构建通过 HTTPS 使用 Debian 官方软件源和官方 PyPI，避免第三方镜像源拒绝下载导致构建失败。
 - 插件继承 `PluginHook`，内置 `builtin_*.py` 自动发现，数据库插件按优先级降序导入。hook 包括 `pre_route`、`on_channel_select`、`pre_request`、`post_response`、`on_error`、`post_send`。
 - 插件数据库 CRUD 不会自动刷新内存中的插件列表，当前需要重启才能重新加载。`hook_type` 被保存，但加载/分发并未按该字段过滤；非流式的 `post_response`、`on_error` 行为也不能直接套用到流式分支。
 - 请求日志通过内置 `LoggingPlugin.post_send()` 落库：非流式使用后台任务，流式在生成器 finally 中执行，避免断开连接后遗漏日志。`log_body`、`log_content` 控制网关日志正文；`core/http_debug.py` 另外在 DEBUG 级别记录上游正文，不受这两个开关控制。排查时不要泄露凭据或真实对话内容。
