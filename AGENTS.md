@@ -36,7 +36,8 @@ README 提到的响应缓存已被历史迁移移除，当前没有网关响应�
 | `backend/app/routes/` | OpenAI/Claude 兼容入口、健康端点、前端代理与 SPA 回退 |
 | `backend/app/middleware/`、`backend/app/dependencies/api_key_auth.py` | trace ID、管理 HMAC、客户端 API Key 鉴权 |
 | `backend/app/services/gateway_handler.py` | 网关主流程、上游调用、流式处理、错误与容灾、token 计量及日志上下文 |
-| `backend/app/services/request_transformer.py` | 协议选择、请求/响应/SSE 转换、thinking 参数与 Claude 流状态 |
+| `backend/app/services/request_transformer.py` | 协议选择、请求/响应及工具调用转换、thinking 参数 |
+| `backend/app/services/stream_transformer.py` | 请求级 SSE 状态、协议生命周期、内容块、工具增量、usage 与终止事件转换 |
 | `backend/app/services/routing_engine.py` | 模型到渠道映射、健康与熔断过滤、排序策略、自定义 JavaScript 路由 |
 | `backend/app/adapters/` | 提供商鉴权头、URL、协议适配；工厂位于 `generic_adapter.py` |
 | `backend/app/services/channel_probe.py` | 探测 URL、各协议探测请求、回复文本提取，供后台手动测试及健康检查复用 |
@@ -48,6 +49,7 @@ README 提到的响应缓存已被历史迁移移除，当前没有网关响应�
 | `frontend/src/api/`、`frontend/src/utils/authFetch.ts` | 管理接口封装、Axios HMAC 签名、流式 fetch 签名 |
 | `frontend/src/views/` | 仪表盘、渠道、模型、密钥、日志、插件、系统配置、演练场及登录页 |
 | `frontend/src/components/ui/`、`frontend/src/composables/` | Fluent 控件封装、反馈消息、主题、表单、弹窗栈与草稿保护 |
+| `frontend/src/utils/modelIdentity.ts`、`ModelIcon.vue`、`ModelLabel.vue` | 本地模型品牌图标、名称识别、手动配置优先级与未知模型回退；组件位于 `frontend/src/components/` |
 | `frontend/src/router/index.ts`、`frontend/src/components/Layout.vue` | 页面路由、鉴权/离开守卫与导航 |
 | `backend/tests/`、`frontend/tests/admin.spec.ts` | 后端探测单测、管理后台浏览器回归测试 |
 
@@ -106,17 +108,20 @@ APP_ENV=development .venv/bin/python -m uvicorn app.main:app --host 127.0.0.1 --
 典型请求流程：客户端鉴权 → 请求和模型权限检查 → RPS 限流 → thinking 默认值 → `pre_route` → 路由及 `on_channel_select` → `pre_request` → 上游模型名映射/协议转换/适配器 → 上游 HTTP → 返回协议转换 → token 计量与 `post_send` 日志。流式与非流式有独立执行分支，修改一支后必须检查另一支。
 
 - 区分客户端请求协议、渠道 `api_type` 和 `provider`。协议值主要是 `openai`、`responses`、`claude`，渠道还支持 `auto`；`auto` 的选择规则在 `resolve_channel_api_type()`，不是简单透传客户端协议。
-- 公共协议转换放在 `request_transformer.py`，提供商差异放在适配器。`google` 和 `custom` 当前使用 `GenericAdapter`，不要据此宣称支持原生 Gemini 协议。
+- 公共请求/响应转换放在 `request_transformer.py`，SSE 状态与转换放在 `stream_transformer.py`，提供商差异放在适配器。每次上游流式调用必须使用独立 `StreamState`。`google` 和 `custom` 当前使用 `GenericAdapter`，不要据此宣称支持原生 Gemini 协议。
 - URL 拼接复用 `build_upstream_url()` / `build_models_url()`，保留已有版本路径、完整 endpoint 和 query，避免重复 `/v1`。Azure deployment URL 有特殊处理。
 - 自定义请求头通过 `merge_custom_headers()` 合并；保留对 `Authorization`、`api-key`、`x-api-key` 的大小写无关保护。
 - 路由目标有 `reference` 和 `inline` 两种；`upstream_model_id` 是调用上游的名字，不能误用公开模型名。内联目标没有 `channel_id`，熔断键使用 `ChannelInfo.circuit_key`，回退到 `ref_id`。
 - 路由按 `priority` 升序读取，支持 `default`、`random`、`weighted`、`custom_js`。`failover_enabled=false` 时只保留第一个候选。`custom_js` 实际调用 Node 子进程，不是隔离沙箱；Python 插件同样执行服务端代码，只适用于可信管理配置。
 - `max_retries` 虽然存在于配置和数据结构，当前网关主要实现逐渠道容灾，没有按该字段重复调用同一渠道的循环。不要把字段存在当作重试功能已实现。
 - 上游 HTTP 400 当前直接结束；其他错误可能触发下一渠道。流式响应一旦已经向客户端发出转换后的数据，就不能回退重放到另一渠道。
-- SSE 解析必须处理分块边界和完整事件，保持各协议终止标记、错误事件、Claude 内容块顺序及 thinking 状态。不能仅验证最终拼接文本。
+- SSE 解析必须处理分块边界、多行 data 和完整事件，保持各协议终止标记、错误事件、Claude 内容块顺序及 thinking 状态。只有协议终止事件才表示完成；空流、提前 EOF 和 HTTP 200 中的错误事件均按失败处理，不能补造成功结束事件。不能仅验证最终拼接文本。
+- 跨协议保留通用 function 工具定义、工具历史、调用 ID、参数增量和结果。提供商原生工具及多 choice 请求不能跨协议转换，返回 400 协议错误（流式在 SSE 中报告）；同协议继续透传。Chat/Responses 的 reasoning 转 Claude 时，流式使用 `thinking` 块和 `thinking_delta`，非流式使用 `thinking` 内容块，不得降级为正文。缺少上游签名时生成兼容占位签名，流式在 thinking 块结束前补一次 `signature_delta`；已有签名原样保留。占位签名不代表 Claude 官方校验通过。并行工具转 Claude 时缓存工具参数及后续块，按顺序结束内容块。
 - 修改 usage 时同时检查非流式提取、流式累积、密钥使用量、请求日志和仪表盘，区分 prompt/completion/total/cache tokens。
+- 流式结束、异常或客户端断开时，在屏蔽取消的 finally 中累计各次尝试已收到的 usage、扣量并执行一次 `post_send`；未收到的 usage 不能推算成已知用量。
 - 健康检查支持 `model_list` 和 `prompt`；模型列表返回非 2xx 时会尝试 prompt 回退。探测模型必须来自已配置的上游模型列表。手动测试和定时检测共用探测工具与状态写入方法。
 - 健康状态写入 PostgreSQL 并缓存在 Redis；熔断状态主要保存在 Redis。不要仅修改 ORM 上的 `circuit_state` 就认为运行时熔断已变化。
+- 熔断候选过滤只读；仅在实际调用上游时通过 `request_permit()` 原子获取半开探测名额。探测租约定时续期，取消时释放，进程异常退出后自动过期。结算携带 permit 的代次，旧请求和过期探测不得关闭新一轮熔断；冷却后探测失败重新熔断，成功关闭熔断。
 
 ## 数据与迁移
 
@@ -149,6 +154,10 @@ APP_ENV=development .venv/bin/python -m uvicorn app.main:app --host 127.0.0.1 --
 - 表单复用 `useUnsavedForm`，其他草稿用 `useDraftGuard`；离开页面、关闭弹窗、退出登录和提交中状态都要考虑草稿保护。`App.vue` 按 `route.path` 挂载页面，只有 query 改变不应清空草稿。
 - 使用 `useToast` / `useConfirm` / `notify` 提供统一反馈。全局 viewport 已在 `App.vue` 挂载，不在页面重复创建；保持消息跨路由展示、独立计时及暂停行为。
 - 主题通过 `useTheme.ts` 的 Fluent design tokens 与 `styles.css` 的 CSS 变量协同实现。保留跟随系统/浅色/深色、存储不可用回退和 `prefers-reduced-motion` 支持；不要给单个控件随意覆盖整套官方视觉样式。
+- 全局圆角使用 Fluent 的 `controlCornerRadius` / `layerCornerRadius`；徽章使用官方 `neutral` 外观。页面、卡片、表格、菜单和弹窗使用短时淡入/位移，图表动画也遵守减少动态效果设置。移动侧边栏保留 64px 导航栏与 272px 展开宽度。
+- 模型图标由 `@lobehub/icons-static-svg` 的静态子集打包，运行时不请求图标 CDN。`ModelConfig.icon` 经迁移 `20261005_0001` 持久化；管理接口创建/更新接受白名单图标 ID，默认 `auto`，`generic` 强制通用图标，局部更新省略 `icon` 时保留原值。新增图标同步后端 `ModelIconName`、前端映射与测试。
+- 手动图标优先于名称识别；自动模式仅在所有上游模型都能识别且品牌一致时推断自定义别名，混合/未知目标使用通用图标。图标不代表协议支持或真实提供商验证，也不参与路由。模型卡片、演练场、密钥模型选择与日志共用此展示规则；日志额外读取模型目录失败时仍可浏览。
+- 渠道与模型支持本地搜索/筛选。渠道与日志表通过复合单元格减少列数；`UiDataTable` 的列 `width` 为最小宽度，窄屏保留横向滚动及键盘访问。
 - 新增页面同时检查 router 的 `requiresAuth` / `title`、Layout 导航和浏览器 fixture；保持移动端布局、可访问名称和键盘操作。
 
 ## 配置、部署和插件的现有边界
@@ -161,7 +170,7 @@ APP_ENV=development .venv/bin/python -m uvicorn app.main:app --host 127.0.0.1 --
 - Docker 保留 Node 运行时供 `custom_js` 路由使用，并以单 Uvicorn worker 运行；每个应用进程都会启动健康检查循环，调整 worker 数量时要考虑重复后台任务。
 - 插件继承 `PluginHook`，内置 `builtin_*.py` 自动发现，数据库插件按优先级降序导入。hook 包括 `pre_route`、`on_channel_select`、`pre_request`、`post_response`、`on_error`、`post_send`。
 - 插件数据库 CRUD 不会自动刷新内存中的插件列表，当前需要重启才能重新加载。`hook_type` 被保存，但加载/分发并未按该字段过滤；非流式的 `post_response`、`on_error` 行为也不能直接套用到流式分支。
-- 请求日志通过内置 `LoggingPlugin.post_send()` 在后台落库。`log_body`、`log_content` 控制网关日志正文；`core/http_debug.py` 另外在 DEBUG 级别记录上游正文，不受这两个开关控制。排查时不要泄露凭据或真实对话内容。
+- 请求日志通过内置 `LoggingPlugin.post_send()` 落库：非流式使用后台任务，流式在生成器 finally 中执行，避免断开连接后遗漏日志。`log_body`、`log_content` 控制网关日志正文；`core/http_debug.py` 另外在 DEBUG 级别记录上游正文，不受这两个开关控制。排查时不要泄露凭据或真实对话内容。
 - `config.yaml`、`.env`、虚拟环境、`node_modules`、`dist`、浏览器测试产物和运行日志属于本地配置或生成文件，不纳入功能提交。
 
 ## 验证方式
@@ -186,11 +195,13 @@ npm run test:e2e -- --grep "playground"
 npm run test:e2e -- --list
 ```
 
-- 后端使用 `unittest.TestCase` / `IsolatedAsyncioTestCase`、`unittest.mock`。测试覆盖探测文本提取、URL 去重、协议 token 字段、健康探测回退和迁移；没有覆盖完整网关或 Redis 状态机。必须查看 skip 结果。
+- 后端使用 `unittest.TestCase` / `IsolatedAsyncioTestCase`、`unittest.mock`。测试覆盖探测文本提取、URL 去重、协议 token 字段、健康探测回退、流式协议转换和迁移；仓库保留的测试尚未覆盖完整网关或 Redis 状态机。必须查看 skip 结果。
+- `test_stream_transformer.py` 使用 HTTP mock 与已安装的 OpenAI/Anthropic SDK 验证六种跨协议流转换、工具历史与非流式响应转换、usage、结束原因、内容块顺序、错误事件、思考与正文分离、兼容签名补齐和已有 Claude 签名透传，不访问真实上游。网关取消、容灾及熔断改动还需使用 ASGI mock 和隔离 Redis 验证。
 - `test_migrations.py` 默认使用内存 SQLite 验证空库、历史版本数据保留、重复升级、回滚及 ORM 结构一致性。设置 `TEST_POSTGRES_URL` 后还会在随机隔离 schema 中执行 PostgreSQL 测试和真实异步启动测试；不设置时这部分跳过。
 - Pyright 配置在 `backend/pyproject.toml`；环境中已安装 Pyright 时可从 `backend/` 执行 `pyright`。它没有列入后端依赖，不要声称默认安装即可运行。
 - Playwright 自动在 `127.0.0.1:3000` 启动或复用 Vite，使用单 worker 和 `Asia/Shanghai` 时区。测试通过 `page.route()` mock 管理 API，不要求启动真实后端；因此通过不代表后端 HMAC、数据库或上游集成已验证。
 - 浏览器测试覆盖登录签名、八个后台页面、主题、移动端、草稿保护、弹窗焦点、表单 payload、消息、日志过滤和三种 Playground 流格式。新增管理字段时同步 fixture 与 payload 断言。
+- 模型图标回归覆盖手动保存/重载/恢复自动、跨页面一致性、未知与混合路由回退、搜索筛选、暗色及减少动态效果；`test_model_icons.py` 验证管理 schema、局部更新和接口读写，迁移测试验证旧数据默认值与手动图标持久化。
 - 当前没有统一 lint 脚本或 CI 工作流。不要编造 `npm test`、`npm run lint`、pytest、Ruff 等项目命令；需要新增工具时明确说明并纳入任务范围。
 - 根据修改选择验证：纯文档核对路径和命令；前端运行构建并按影响运行 E2E；网关/鉴权/路由改动补充相关行为回归；schema 改动在隔离开发库验证迁移。使用 mock 避免不必要的真实上游调用。
 
