@@ -1,7 +1,9 @@
+import asyncio
 import json
 import time
 from typing import Any, TypedDict
 
+import anyio
 import httpx
 from fastapi import Request, HTTPException, BackgroundTasks
 from fastapi.responses import JSONResponse, StreamingResponse
@@ -13,22 +15,21 @@ from app.core.logging import get_logger
 from app.middleware.request_id import get_trace_id
 from app.services.api_key_service import increment_token_usage, check_model_access
 from app.services.routing_engine import route_request, ChannelInfo
-from app.services.circuit_breaker import record_success, record_failure
+from app.services.circuit_breaker import record_success, record_failure, request_permit
 from app.services.rate_limiter import check_rate_limit
 from app.adapters.generic_adapter import get_adapter
 from app.adapters.base_adapter import merge_custom_headers
 from app.plugins.plugin_engine import plugin_engine
 from app.services.request_transformer import (
-    ClaudeStreamState,
     apply_default_thinking,
     get_effective_thinking_effort,
-    is_stream_done_chunk,
     resolve_channel_api_type,
-    stream_done_marker,
     transform_request_body,
     transform_response_body,
     transform_stream_chunk,
 )
+
+from app.services.stream_transformer import StreamProtocolError, StreamState
 
 logger = get_logger(__name__)
 
@@ -157,42 +158,27 @@ def extract_stream_token_usage(chunk_data: str) -> dict[str, int]:
 def _extract_stream_output_text(converted: str) -> str:
     if not settings.log_content:
         return ""
-    try:
-        for line in converted.strip().split("\n"):
-            if line.startswith("data:"):
-                data = line[5:].strip()
-                if not data or data == "[DONE]":
-                    continue
-                payload = json.loads(data)
-                if not isinstance(payload, dict):
-                    continue
-                ptype = payload.get("type", "")
-
-                choices = payload.get("choices")
-                if isinstance(choices, list) and choices:
-                    delta = choices[0].get("delta", {}) if isinstance(choices[0], dict) else {}
-                    content = delta.get("content", "")
-                    reasoning = delta.get("reasoning_content", "")
-                    if content:
-                        return content
-                    if reasoning:
-                        return f"<thinking>{reasoning}</thinking>"
-
-                if ptype == "response.output_text.delta":
-                    return str(payload.get("delta", ""))
-                if ptype == "response.reasoning_summary_text.delta":
-                    return f"<thinking>{payload.get('delta', '')}</thinking>"
-
-                if ptype == "content_block_delta":
-                    delta = payload.get("delta", {})
-                    delta_type = delta.get("type", "")
-                    if delta_type == "text_delta":
-                        return delta.get("text", "")
-                    if delta_type == "thinking_delta":
-                        return f"<thinking>{delta.get('thinking', '')}</thinking>"
-    except Exception:
-        pass
-    return ""
+    parts = []
+    for payload in _sse_payloads(converted):
+        kind = payload.get("type", "")
+        choices = payload.get("choices") or []
+        if choices:
+            delta = choices[0].get("delta") or {}
+            if delta.get("reasoning_content"):
+                parts.append(f"<thinking>{delta['reasoning_content']}</thinking>")
+            if delta.get("content"):
+                parts.append(str(delta["content"]))
+        elif kind == "response.output_text.delta":
+            parts.append(str(payload.get("delta", "")))
+        elif kind in ("response.reasoning_summary_text.delta", "response.reasoning_text.delta"):
+            parts.append(f"<thinking>{payload.get('delta', '')}</thinking>")
+        elif kind == "content_block_delta":
+            delta = payload.get("delta") or {}
+            if delta.get("type") == "text_delta":
+                parts.append(delta.get("text", ""))
+            elif delta.get("type") == "thinking_delta":
+                parts.append(f"<thinking>{delta.get('thinking', '')}</thinking>")
+    return "".join(parts)
 
 _MAX_LOG_TEXT_LENGTH = 50000
 
@@ -438,9 +424,14 @@ def create_error_body(
         request_id=get_trace_id(),
     )
 
-def stream_error_event(status_code: int, message: str, api_type: str, detail: Any = None) -> str:
+def stream_error_event(status_code: int, message: str, api_type: str, detail: Any = None, *, sequence_number: int = 0) -> str:
     body = create_error_body(status_code, message, api_type, detail)
     payload = json.dumps(body, ensure_ascii=False)
+    if api_type == "responses":
+        return "event: error\ndata: " + json.dumps({
+            "type": "error", "code": str(status_code), "message": message,
+            "param": None, "sequence_number": sequence_number,
+        }, ensure_ascii=False) + "\n\n"
     if api_type == "claude":
         return f"event: error\ndata: {payload}\n\n"
     return f"data: {payload}\n\n"
@@ -539,7 +530,6 @@ async def handle_gateway_request(
             input_content=_extract_input_content(request_body),
             **api_key_log_context,
         )
-        _add_request_log_task(background_tasks, log_context)
         return StreamingResponse(
             stream_gateway_request(
                 request_body, api_type, trace_id, api_key_hash, start_time, log_context, api_key_id
@@ -636,33 +626,33 @@ async def _call_upstream_channels(
     last_status_code = 503
 
     for channel in channels:
-        try:
-            response, status_code, channel_url = await try_channel(
-                channel, request_body, api_type, trace_id, api_key_hash, model_config
-            )
-
-            await record_success(channel.circuit_key)
-
-            return channel, response, status_code, channel_url
-        except NoRetryError:
-            raise
-        except Exception as e:
-            last_error = str(e)
-            last_status_code = getattr(e, "status_code", 500)
-
-            await record_failure(channel.circuit_key)
-
-            error_decision = await plugin_engine.execute_hook(
-                "on_error", error=e, channel_info=channel,
-                context={"trace_id": trace_id, "api_type": api_type, "model": request_body.get("model", "")}
-            )
-            if error_decision and not error_decision.get("retry", True):
-                break
-
-            logger.warning(
-                f"Channel {channel.name} failed, trying next",
-                extra={"trace_id": trace_id, "error": str(e)[:200]}
-            )
+        async with request_permit(channel.circuit_key, channel.timeout or settings.default_channel_timeout) as permit:
+            if permit is None:
+                continue
+            try:
+                response, status_code, channel_url = await try_channel(
+                    channel, request_body, api_type, trace_id, api_key_hash, model_config
+                )
+            except NoRetryError:
+                raise
+            except Exception as e:
+                last_error = str(e)
+                last_status_code = getattr(e, "status_code", 502)
+                await record_failure(channel.circuit_key, permit)
+                error_decision = await plugin_engine.execute_hook(
+                    "on_error", error=e, channel_info=channel,
+                    context={"trace_id": trace_id, "api_type": api_type, "model": request_body.get("model", "")}
+                )
+                if error_decision and not error_decision.get("retry", True):
+                    break
+                logger.warning("Channel failed, trying next", extra={"trace_id": trace_id, "channel": channel.name})
+            else:
+                # Circuit bookkeeping must not replay a successful model call.
+                try:
+                    await record_success(channel.circuit_key, permit)
+                except Exception:
+                    logger.exception("Failed to record circuit success", extra={"trace_id": trace_id})
+                return channel, response, status_code, channel_url
 
     raise UpstreamAPIError(
         status_code=last_status_code,
@@ -753,7 +743,10 @@ async def build_upstream_request(
         upstream_body["model"] = channel.upstream_model_id
 
     upstream_api_type = resolve_channel_api_type(channel, api_type, upstream_body)
-    normalized_body = transform_request_body(upstream_body, api_type, upstream_api_type)
+    try:
+        normalized_body = transform_request_body(upstream_body, api_type, upstream_api_type)
+    except ValueError as exc:
+        raise NoRetryError(400, create_error_body(400, str(exc), api_type)) from exc
     provider_request = adapter.convert_request(normalized_body, upstream_api_type)
     if upstream_api_type == "claude" and _model_default_thinking_applies(model_config, request_body):
         _apply_claude_default_mode_override(provider_request, model_config)
@@ -794,194 +787,120 @@ async def stream_gateway_request(
     log_context: dict[str, Any],
     api_key_id: str | None = None,
 ):
-    model_name = request_body.get("model", "")
-    last_token_usage = _empty_token_usage()
-    last_error = "All channels failed"
-    last_status_code = 503
-    stream_output_parts: list[str] = []
-
-    request_body = await plugin_engine.execute_hook(
-        "pre_route", request_body=request_body, api_type=api_type,
-        context={"trace_id": trace_id, "api_key_hash": api_key_hash}
-    )
-    if not isinstance(request_body, dict):
-        _finish_request_log(
-            log_context,
-            start_time,
-            status_code=500,
-            error_message="pre_route hook returned invalid request body",
+    total_usage = _empty_token_usage()
+    output_text = ""
+    status_code = 499
+    error_message = "Client disconnected before the stream completed"
+    try:
+        request_body = await plugin_engine.execute_hook(
+            "pre_route", request_body=request_body, api_type=api_type,
+            context={"trace_id": trace_id, "api_key_hash": api_key_hash},
         )
-        yield stream_error_event(500, "pre_route hook returned invalid request body", api_type)
-        yield stream_done_marker(api_type)
-        return
-    model_name = request_body.get("model", model_name)
-
-    from sqlalchemy import select
-    from app.core.database import AsyncSessionLocal
-    from app.models.model_config import ModelConfig
-
-    async with AsyncSessionLocal() as session:
-        result = await session.execute(
-            select(ModelConfig).where(ModelConfig.name == model_name)
+        if not isinstance(request_body, dict):
+            raise StreamProtocolError("pre_route hook returned invalid request body", 500)
+        model_name = request_body.get("model", "")
+        channels, model_config = await route_request(model_name, api_type, request_body)
+        request_body = apply_default_thinking(request_body, api_type, model_config)
+        log_context.update(
+            model=model_name, request_body=_serialize_body_for_log(request_body),
+            input_content=_extract_input_content(request_body),
+            thinking_effort=get_effective_thinking_effort(request_body),
         )
-        model_config = result.scalar_one_or_none()
-
-    request_body = apply_default_thinking(request_body, api_type, model_config)
-    _finish_request_log(
-        log_context,
-        start_time,
-        model=model_name,
-        request_body=_serialize_body_for_log(request_body),
-        input_content=_extract_input_content(request_body),
-        thinking_effort=get_effective_thinking_effort(request_body),
-    )
-
-    channels, _model_config = await route_request(model_name, api_type, request_body)
-    channels = await plugin_engine.execute_hook(
-        "on_channel_select", channels=channels,
-        context={"trace_id": trace_id, "api_type": api_type, "model": model_name}
-    )
-    if not channels:
-        last_error = f"No available channels for model {model_name}"
-        _finish_request_log(
-            log_context,
-            start_time,
-            status_code=503,
-            error_message=last_error,
+        channels = await plugin_engine.execute_hook(
+            "on_channel_select", channels=channels,
+            context={"trace_id": trace_id, "api_type": api_type, "model": model_name},
         )
-        yield stream_error_event(503, last_error, api_type)
-        yield stream_done_marker(api_type)
-        return
-
-    for channel in channels:
-        token_usage = _empty_token_usage()
-        data_sent = False
-        try:
-            adapter, provider_request, headers, url, upstream_api_type = await build_upstream_request(
-                channel, request_body, api_type, trace_id, api_key_hash, model_config
-            )
-            claude_state = ClaudeStreamState() if (api_type == "claude" and upstream_api_type != api_type) else None
+        status_code = 503
+        error_message = f"No available channels for model {model_name}"
+        for channel in channels or []:
+            token_usage = _empty_token_usage()
+            state: StreamState | None = None
+            data_sent = False
+            completed = False
+            failed = False
             timeout = channel.timeout or settings.default_channel_timeout
-
-            log_upstream_request(logger, "POST", url, provider_request, trace_id, channel.name)
-            async with httpx.AsyncClient(timeout=timeout) as client:
-                async with client.stream("POST", url, json=provider_request, headers=headers) as resp:
-                    log_upstream_response(logger, "POST", url, resp.status_code, "<streaming response>", trace_id, channel.name)
-                    last_status_code = resp.status_code
-                    if resp.status_code >= 500:
-                        last_error = f"Upstream returned HTTP {resp.status_code}"
-                        last_token_usage = token_usage
-                        await record_failure(channel.circuit_key)
-                        continue
-
-                    if resp.status_code >= 400:
-                        error_text = await resp.aread()
-                        log_upstream_response(logger, "POST", url, resp.status_code, error_text, trace_id, channel.name)
-                        error_message = error_text.decode(errors="replace")[:500]
-                        if resp.status_code == 400:
-                            _finish_request_log(
-                                log_context,
-                                start_time,
-                                status_code=400,
-                                error_message=error_message,
-                                channel_id=channel.channel_id or "inline",
-                                channel_name=channel.name,
-                                upstream_url=url,
-                            )
-                            yield stream_error_event(400, error_message, api_type)
-                            yield stream_done_marker(api_type)
-                            return
-                        await record_failure(channel.circuit_key)
-                        last_error = f"Upstream returned HTTP {resp.status_code}: {error_message}"
-                        last_status_code = resp.status_code
-                        last_token_usage = token_usage
-                        continue
-
-                    received_done = False
-                    async for event in iter_sse_events(resp, url, trace_id, channel.name):
-                        provider_chunk = await adapter.convert_stream_chunk(event, upstream_api_type)
-                        if provider_chunk:
-                            _merge_token_usage(token_usage, extract_stream_token_usage(provider_chunk))
-                            if is_stream_done_chunk(provider_chunk):
-                                received_done = True
-                            converted = transform_stream_chunk(provider_chunk, upstream_api_type, api_type, claude_state)
-                            if converted:
-                                stream_output_parts.append(_extract_stream_output_text(converted))
-                                yield converted
-                                data_sent = True
-
-                    if not received_done:
-                        yield stream_done_marker(api_type)
-
-            await record_success(channel.circuit_key)
+            async with request_permit(channel.circuit_key, timeout) as permit:
+                if permit is None:
+                    continue
+                log_context.update(channel_id=channel.channel_id or "inline", channel_name=channel.name)
+                status_code, error_message = 499, "Client disconnected before the stream completed"
+                try:
+                    adapter, provider_request, headers, url, upstream_api_type = await build_upstream_request(
+                        channel, request_body, api_type, trace_id, api_key_hash, model_config,
+                    )
+                    log_context["upstream_url"] = url
+                    state = StreamState(upstream_api_type, api_type, model_name)
+                    log_upstream_request(logger, "POST", url, provider_request, trace_id, channel.name)
+                    async with httpx.AsyncClient(timeout=timeout) as client:
+                        async with client.stream("POST", url, json=provider_request, headers=headers) as resp:
+                            if not 200 <= resp.status_code < 300:
+                                raw = await resp.aread()
+                                try:
+                                    detail = json.loads(raw)
+                                except ValueError:
+                                    detail = {"error": {"message": raw.decode(errors="replace")[:500]}}
+                                upstream_status = resp.status_code if resp.status_code >= 400 else 502
+                                raise UpstreamAPIError(upstream_status, create_error_body(
+                                    upstream_status, extract_error_message(detail), api_type, detail,
+                                ))
+                            async for event in iter_sse_events(resp, url, trace_id, channel.name):
+                                provider_chunk = await adapter.convert_stream_chunk(event, upstream_api_type)
+                                if not provider_chunk:
+                                    continue
+                                _merge_token_usage(token_usage, extract_stream_token_usage(provider_chunk))
+                                converted = transform_stream_chunk(provider_chunk, upstream_api_type, api_type, state)
+                                if state.finished:
+                                    completed = True
+                                    status_code, error_message = 200, ""
+                                if converted:
+                                    if settings.log_content and len(output_text) < _MAX_LOG_TEXT_LENGTH:
+                                        output_text += _extract_stream_output_text(converted)[:_MAX_LOG_TEXT_LENGTH - len(output_text)]
+                                    # Set before yielding: generator close/cancellation can
+                                    # occur while suspended at this exact yield.
+                                    data_sent = True
+                                    yield converted
+                                if state.finished:
+                                    break
+                            if not completed:
+                                raise StreamProtocolError("Upstream stream ended before its terminal event")
+                    return
+                except (asyncio.CancelledError, GeneratorExit):
+                    raise
+                except Exception as exc:
+                    failed = True
+                    status_code = getattr(exc, "status_code", 502)
+                    error_message = extract_error_message(exc.error_body) if isinstance(exc, (NoRetryError, UpstreamAPIError)) else str(exc)
+                    if data_sent or status_code == 400:
+                        yield stream_error_event(status_code, error_message, api_type,
+                                                 sequence_number=state.sequence if state else 0)
+                        return
+                    logger.warning("Stream channel failed, trying next", extra={"trace_id": trace_id, "channel": channel.name})
+                finally:
+                    for key in total_usage:
+                        total_usage[key] += token_usage[key]
+                    with anyio.CancelScope(shield=True):
+                        try:
+                            if completed:
+                                await record_success(channel.circuit_key, permit)
+                            elif failed and status_code != 400:
+                                await record_failure(channel.circuit_key, permit)
+                        except Exception:
+                            logger.exception("Failed to update stream circuit state", extra={"trace_id": trace_id})
+        yield stream_error_event(status_code, error_message, api_type)
+    except (asyncio.CancelledError, GeneratorExit):
+        raise
+    except Exception as exc:
+        status_code = getattr(exc, "status_code", 500)
+        error_message = str(exc)
+        yield stream_error_event(status_code, error_message, api_type)
+    finally:
+        # Starlette cancels the producer when the client disconnects. Shield
+        # bookkeeping so known usage and the final log are still persisted.
+        with anyio.CancelScope(shield=True):
             _finish_request_log(
-                log_context,
-                start_time,
-                status_code=200,
-                error_message="",
-                channel_id=channel.channel_id or "inline",
-                channel_name=channel.name,
-                upstream_url=url,
-                response_body=_serialize_body_for_log("<streaming>"),
-                output_content=_truncate("".join(stream_output_parts)),
-                **token_usage,
+                log_context, start_time, status_code=status_code, error_message=error_message,
+                output_content=output_text, response_body=_serialize_body_for_log("<streaming>"),
+                **total_usage,
             )
-            await _safe_increment_token_usage(
-                api_key_id, token_usage.get("total_tokens", 0), trace_id
-            )
-            return
-
-        except Exception as e:
-            last_token_usage = token_usage
-            last_error = str(e)
-            last_status_code = getattr(e, "status_code", 500)
-
-            if data_sent:
-                await record_failure(channel.circuit_key)
-                logger.error(
-                    f"Stream channel {channel.name} failed after data was sent, cannot fallback",
-                    extra={"trace_id": trace_id, "error": str(e)[:200]}
-                )
-                _finish_request_log(
-                    log_context,
-                    start_time,
-                    status_code=last_status_code,
-                    error_message=last_error,
-                    channel_id=channel.channel_id or "inline",
-                    channel_name=channel.name,
-                    **last_token_usage,
-                )
-                yield stream_error_event(last_status_code, f"Stream interrupted: {last_error}", api_type)
-                yield stream_done_marker(api_type)
-                return
-
-            if last_status_code == 400:
-                _finish_request_log(
-                    log_context,
-                    start_time,
-                    status_code=400,
-                    error_message=last_error,
-                    channel_id=channel.channel_id or "inline",
-                    channel_name=channel.name,
-                )
-                yield stream_error_event(400, last_error, api_type)
-                yield stream_done_marker(api_type)
-                return
-
-            await record_failure(channel.circuit_key)
-            logger.warning(f"Stream channel {channel.name} failed: {e}")
-            continue
-
-    _finish_request_log(
-        log_context,
-        start_time,
-        status_code=last_status_code,
-        error_message=last_error,
-        **last_token_usage,
-    )
-    if api_type in ("openai", "responses"):
-        yield stream_error_event(last_status_code, last_error, api_type)
-        yield stream_done_marker(api_type)
-    else:
-        yield stream_error_event(last_status_code, last_error, api_type)
-        yield stream_done_marker(api_type)
+            await _safe_increment_token_usage(api_key_id, total_usage["total_tokens"], trace_id)
+            await plugin_engine.execute_hook("post_send", context=log_context)

@@ -1,138 +1,13 @@
-import base64
 import json
 import time
-import uuid
-from contextvars import ContextVar
 from typing import Any, TYPE_CHECKING
 
 if TYPE_CHECKING:
     from app.services.routing_engine import ChannelInfo
 
-_claude_passthrough_thinking_block_open: ContextVar[bool] = ContextVar(
-    "_claude_passthrough_thinking_block_open", default=False
+from app.services.stream_transformer import (
+    StreamState, make_compat_thinking_signature, stop_reason,
 )
-_claude_passthrough_thinking_block_index: ContextVar[int] = ContextVar(
-    "_claude_passthrough_thinking_block_index", default=-1
-)
-
-class ClaudeStreamState:
-
-    def __init__(self) -> None:
-        self.message_started: bool = False
-        self.thinking_block_started: bool = False
-        self.thinking_block_stopped: bool = False
-        self.text_block_started: bool = False
-        self.text_block_stopped: bool = False
-        self.model: str = ""
-        self.message_id: str = ""
-        self.message_stopped: bool = False
-
-    def _sse(self, event_type: str, data: dict[str, Any]) -> str:
-        return f"event: {event_type}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
-
-    def emit_message_start(self, model: str = "", msg_id: str = "") -> str:
-        if self.message_started:
-            return ""
-        self.message_started = True
-        self.model = model
-        self.message_id = msg_id or f"msg_{int(time.time())}"
-        return self._sse("message_start", {
-            "type": "message_start",
-            "message": {
-                "id": self.message_id,
-                "type": "message",
-                "role": "assistant",
-                "content": [],
-                "model": model,
-                "stop_reason": "",
-                "stop_sequence": None,
-                "usage": {"input_tokens": 0, "output_tokens": 0},
-            },
-        })
-
-    def emit_thinking_start(self) -> str:
-        if self.thinking_block_started:
-            return ""
-        self.thinking_block_started = True
-        return self._sse("content_block_start", {
-            "type": "content_block_start",
-            "index": 0,
-            "content_block": {"type": "thinking", "thinking": ""},
-        })
-
-    def emit_thinking_delta(self, thinking: str) -> str:
-        if not thinking:
-            return ""
-        return self._sse("content_block_delta", {
-            "type": "content_block_delta",
-            "index": 0,
-            "delta": {"type": "thinking_delta", "thinking": thinking},
-        })
-
-    def emit_thinking_stop(self) -> str:
-        if self.thinking_block_stopped or not self.thinking_block_started:
-            return ""
-        self.thinking_block_stopped = True
-        return self._sse("content_block_stop", {
-            "type": "content_block_stop",
-            "index": 0,
-        })
-
-    def emit_text_start(self) -> str:
-        if self.text_block_started:
-            return ""
-        parts = []
-        if self.thinking_block_started and not self.thinking_block_stopped:
-            parts.append(self.emit_thinking_stop())
-        self.text_block_started = True
-        idx = 1 if self.thinking_block_started else 0
-        parts.append(self._sse("content_block_start", {
-            "type": "content_block_start",
-            "index": idx,
-            "content_block": {"type": "text", "text": ""},
-        }))
-        self._text_index = idx
-        return "".join(parts)
-
-    def emit_text_delta(self, text: str) -> str:
-        if not text:
-            return ""
-        idx = getattr(self, "_text_index", 0)
-        return self._sse("content_block_delta", {
-            "type": "content_block_delta",
-            "index": idx,
-            "delta": {"type": "text_delta", "text": text},
-        })
-
-    def emit_text_stop(self) -> str:
-        if self.text_block_stopped or not self.text_block_started:
-            return ""
-        self.text_block_stopped = True
-        idx = getattr(self, "_text_index", 0)
-        return self._sse("content_block_stop", {
-            "type": "content_block_stop",
-            "index": idx,
-        })
-
-    def emit_message_delta(self, stop_reason: str = "end_turn",
-                           input_tokens: int = 0, output_tokens: int = 0) -> str:
-        return self._sse("message_delta", {
-            "type": "message_delta",
-            "delta": {"stop_reason": stop_reason, "stop_sequence": None},
-            "usage": {"output_tokens": output_tokens},
-        })
-
-    def emit_message_stop(self) -> str:
-        if self.message_stopped:
-            return ""
-        self.message_stopped = True
-        parts = []
-        if self.text_block_started and not self.text_block_stopped:
-            parts.append(self.emit_text_stop())
-        if self.thinking_block_started and not self.thinking_block_stopped:
-            parts.append(self.emit_thinking_stop())
-        parts.append(self._sse("message_stop", {"type": "message_stop"}))
-        return "".join(parts)
 
 API_TYPE_ALIASES = {
     "chat": "openai",
@@ -358,13 +233,19 @@ def transform_request_body(
     if target == "auto":
         target = "responses" if request_uses_openai_reasoning(request_body) else "openai"
 
+    if source != target and request_body.get("n", 1) != 1:
+        raise ValueError("Multiple choices cannot be converted between protocols")
     if target == "openai":
-        return _to_openai_chat_request(request_body, source)
-    if target == "responses":
-        return _to_responses_request(request_body, source)
-    if target == "claude":
-        return _to_claude_request(request_body, source)
-    return dict(request_body)
+        result = _to_openai_chat_request(request_body, source)
+    elif target == "responses":
+        result = _to_responses_request(request_body, source)
+    elif target == "claude":
+        result = _to_claude_request(request_body, source)
+    else:
+        return dict(request_body)
+    _convert_tools(result, request_body, source, target)
+    return result
+
 
 def transform_response_body(
     response_body: dict[str, Any],
@@ -379,103 +260,60 @@ def transform_response_body(
         target = "openai"
 
     if source == target:
+        if target == "claude" and isinstance(response_body.get("content"), list):
+            content = [
+                {**block, "signature": make_compat_thinking_signature()}
+                if block.get("type") == "thinking" and not block.get("signature") else block
+                for block in response_body["content"]
+            ]
+            return {**response_body, "content": content}
         return response_body
+    calls = _response_tool_calls(response_body, source)
+    if source == "openai":
+        choices = response_body.get("choices") or [{}]
+        reason = choices[0].get("finish_reason")
+    elif source == "claude":
+        reason = response_body.get("stop_reason")
+    else:
+        reason = (response_body.get("incomplete_details") or {}).get("reason")
     if target == "openai":
-        return _to_openai_chat_response(response_body, source, original_request)
-    if target == "responses":
-        return _to_responses_response(response_body, source, original_request)
-    if target == "claude":
-        return _to_claude_response(response_body, source, original_request)
-    return response_body
+        result = _to_openai_chat_response(response_body, source, original_request)
+        choice = result["choices"][0]
+        choice["finish_reason"] = stop_reason(reason, target, bool(calls))
+        reasoning = "".join(b["text"] for b in _response_content_blocks(response_body, source) if b["kind"] == "thinking")
+        if reasoning:
+            choice["message"]["reasoning_content"] = reasoning
+        if calls:
+            choice["message"]["tool_calls"] = calls
+            if not choice["message"]["content"]:
+                choice["message"]["content"] = None
+    elif target == "responses":
+        result = _to_responses_response(response_body, source, original_request)
+        if stop_reason(reason, "openai") in ("length", "content_filter"):
+            result["status"] = "incomplete"
+            result["incomplete_details"] = {"reason": "max_output_tokens" if stop_reason(reason, "openai") == "length" else "content_filter"}
+    elif target == "claude":
+        result = _to_claude_response(response_body, source, original_request)
+        result["stop_reason"] = stop_reason(reason, target, bool(calls))
+    else:
+        return response_body
+    return result
+
 
 def transform_stream_chunk(
     chunk_data: str,
     source_api_type: str,
     target_api_type: str,
-    claude_state: ClaudeStreamState | None = None,
+    state: StreamState | None = None,
 ) -> str | None:
     source = normalize_api_type(source_api_type)
     target = normalize_api_type(target_api_type)
-
     if target == "auto":
         target = "openai"
-
-    if source == target:
-        if is_stream_done_chunk(chunk_data) and claude_state is not None and not claude_state.message_stopped:
-            parts = [_ensure_sse_frame(chunk_data) or ""]
-            parts.append(claude_state.emit_message_delta())
-            parts.append(claude_state.emit_message_stop())
-            result = "".join(parts)
-            return result if result.strip() else None
-        if source == "claude":
-            return _patch_claude_sse_frame(chunk_data)
-        return _ensure_sse_frame(chunk_data)
-
-    if is_stream_done_chunk(chunk_data):
-        if target == "claude" and claude_state is not None:
-            parts = []
-            if not claude_state.message_stopped:
-                if claude_state.text_block_started and not claude_state.text_block_stopped:
-                    parts.append(claude_state.emit_text_stop())
-                if claude_state.thinking_block_started and not claude_state.thinking_block_stopped:
-                    parts.append(claude_state.emit_thinking_stop())
-                if claude_state.message_started and not claude_state.message_stopped:
-                    parts.append(claude_state.emit_message_delta())
-                    parts.append(claude_state.emit_message_stop())
-            result = "".join(parts)
-            return result if result else None
-        if source == target == "responses":
-            return _ensure_sse_frame(chunk_data)
-        return stream_done_marker(target)
-    if source == "openai" and target == "responses":
-        return _openai_stream_to_responses(chunk_data)
-    if source == "openai" and target == "claude":
-        return _openai_stream_to_claude(chunk_data, claude_state)
-    if source == "claude" and target == "openai":
-        return _claude_stream_to_openai(chunk_data)
-    if source == "claude" and target == "responses":
-        return _claude_stream_to_responses(chunk_data)
-    if source == "responses" and target == "openai":
-        return _responses_stream_to_openai(chunk_data)
-    if source == "responses" and target == "claude":
-        return _responses_stream_to_claude(chunk_data, claude_state)
-    return _ensure_sse_frame(chunk_data)
-
-def stream_done_marker(api_type: str) -> str:
-    normalized = normalize_api_type(api_type)
-    if normalized == "auto":
-        normalized = "openai"
-    if normalized == "claude":
-        return "event: message_stop\ndata: {\"type\": \"message_stop\"}\n\n"
-    if normalized == "responses":
-        created_at = int(time.time())
-        event_data = {
-            "type": "response.completed",
-            "sequence_number": 0,
-            "response": {
-                "id": f"resp_proxy_{created_at}",
-                "object": "response",
-                "created_at": created_at,
-                "status": "completed",
-                "error": None,
-                "incomplete_details": None,
-                "model": "",
-                "output": [],
-            },
-        }
-        return f"event: response.completed\ndata: {json.dumps(event_data, ensure_ascii=False)}\n\n"
-    return "data: [DONE]\n\n"
-
-def is_stream_done_chunk(chunk_data: str) -> bool:
-    if not chunk_data:
-        return False
-    data = chunk_data.strip()
-    if "data: [DONE]" in data:
-        return True
-    payload = _extract_sse_payload(chunk_data)
-    if not payload:
-        return False
-    return payload.get("type") in {"message_stop", "response.completed"}
+    if state is None:
+        state = StreamState(source, target)
+    state.source, state.target = source, target
+    return state.feed(chunk_data)
 
 def _filter_fields(body: dict[str, Any], allowed_fields: set[str]) -> dict[str, Any]:
     return {key: value for key, value in body.items() if key in allowed_fields and value is not None}
@@ -525,90 +363,13 @@ def _responses_content_to_openai(content: Any) -> str | list[dict[str, Any]]:
 
     return parts or ""
 
-def _responses_content_to_claude(content: Any) -> str | list[dict[str, Any]]:
-    if isinstance(content, str):
-        return content
-    if not isinstance(content, list):
-        return _content_to_text(content)
-
-    parts: list[dict[str, Any]] = []
-    for item in content:
-        if not isinstance(item, dict):
-            parts.append({"type": "text", "text": str(item)})
-            continue
-
-        item_type = item.get("type")
-        if item_type in ("input_text", "output_text", "text"):
-            text = item.get("text")
-            if text:
-                parts.append({"type": "text", "text": str(text)})
-        elif item_type == "input_image":
-            image_url = item.get("image_url") or item.get("url") or ""
-            if isinstance(image_url, str) and image_url.startswith("data:"):
-                parts.append({
-                    "type": "image",
-                    "source": {
-                        "type": "base64",
-                        "media_type": image_url.split(";", 1)[0].replace("data:", "") or "image/jpeg",
-                        "data": image_url.split(",", 1)[-1],
-                    },
-                })
-        else:
-            text = item.get("text") or item.get("content")
-            if text:
-                parts.append({"type": "text", "text": str(text)})
-
-    return parts or ""
-
 def _to_openai_chat_request(body: dict[str, Any], source_api_type: str) -> dict[str, Any]:
     if source_api_type == "openai" and "messages" in body:
         return _filter_fields(body, OPENAI_CHAT_FIELDS)
 
-    if source_api_type == "claude":
-        messages: list[dict[str, Any]] = []
-        system = body.get("system")
-        if system:
-            messages.append({"role": "system", "content": _content_to_text(system)})
-        for msg in body.get("messages", []):
-            if not isinstance(msg, dict):
-                continue
-            role = msg.get("role", "user")
-            if role not in ("user", "assistant", "system", "developer", "tool"):
-                role = "user"
-            messages.append({"role": role, "content": _content_to_text(msg.get("content", ""))})
-
-        result: dict[str, Any] = {"model": body.get("model", ""), "messages": messages}
-        _copy_if_present(body, result, "max_tokens")
-        _copy_if_present(body, result, "temperature")
-        _copy_if_present(body, result, "top_p")
-        if "stop_sequences" in body:
-            result["stop"] = body["stop_sequences"]
-        _copy_common_openai_params(body, result)
-        return _filter_fields(result, OPENAI_CHAT_FIELDS)
-
-    messages = []
-    instructions = body.get("instructions")
-    if instructions:
-        messages.append({"role": "system", "content": _content_to_text(instructions)})
-
-    input_value = body.get("input", body.get("prompt", ""))
-    if isinstance(input_value, str):
-        messages.append({"role": "user", "content": input_value})
-    elif isinstance(input_value, list):
-        for item in input_value:
-            if not isinstance(item, dict):
-                messages.append({"role": "user", "content": str(item)})
-                continue
-            role = item.get("role", "user")
-            if role in ("system", "developer"):
-                role = "system"
-            elif role not in ("user", "assistant", "tool"):
-                role = "user"
-            messages.append({"role": role, "content": _responses_content_to_openai(item.get("content", ""))})
-    elif input_value:
-        messages.append({"role": "user", "content": str(input_value)})
-
-    result = {"model": body.get("model", ""), "messages": messages}
+    result: dict[str, Any] = {"model": body.get("model", ""), "messages": _messages_as_chat(body, source_api_type)}
+    if source_api_type == "claude" and "stop_sequences" in body:
+        result["stop"] = body["stop_sequences"]
     if "max_completion_tokens" in body:
         result["max_completion_tokens"] = body["max_completion_tokens"]
     elif "max_tokens" in body:
@@ -626,49 +387,20 @@ def _to_responses_request(body: dict[str, Any], source_api_type: str) -> dict[st
         _ensure_responses_reasoning_summary(result, body)
         return result
 
-    result: dict[str, Any] = {"model": body.get("model", "")}
-
+    items, instructions = _chat_as_responses(_messages_as_chat(body, source_api_type))
+    result: dict[str, Any] = {"model": body.get("model", ""), "input": items}
+    if instructions:
+        result["instructions"] = instructions
+    if "max_completion_tokens" in body:
+        result["max_output_tokens"] = body["max_completion_tokens"]
+    elif "max_tokens" in body:
+        result["max_output_tokens"] = body["max_tokens"]
     if source_api_type == "claude":
-        if body.get("system"):
-            result["instructions"] = _content_to_text(body.get("system"))
-        result["input"] = [
-            {"role": msg.get("role", "user"), "content": msg.get("content", "")}
-            for msg in body.get("messages", [])
-            if isinstance(msg, dict)
-        ]
-        if "max_tokens" in body:
-            result["max_output_tokens"] = body["max_tokens"]
-        if "stop_sequences" in body:
-            result["stop"] = body["stop_sequences"]
         thinking_effort = _claude_thinking_to_reasoning_effort(body)
-        if thinking_effort:
-            result["reasoning"] = {"effort": thinking_effort}
     else:
-        input_items = []
-        instructions = []
-        for msg in body.get("messages", []):
-            if not isinstance(msg, dict):
-                continue
-            role = msg.get("role", "user")
-            content = msg.get("content", "")
-            if role in ("system", "developer"):
-                text = _content_to_text(content)
-                if text:
-                    instructions.append(text)
-            else:
-                input_items.append({"role": role if role in ("user", "assistant") else "user", "content": content})
-        if instructions:
-            result["instructions"] = "\n".join(instructions)
-        result["input"] = input_items or body.get("prompt", "")
-        if "max_completion_tokens" in body:
-            result["max_output_tokens"] = body["max_completion_tokens"]
-        elif "max_tokens" in body:
-            result["max_output_tokens"] = body["max_tokens"]
-        if "reasoning_effort" in body:
-            result["reasoning"] = {"effort": body["reasoning_effort"]}
-        thinking_effort = _thinking_to_reasoning_effort(body.get("thinking"))
-        if thinking_effort and "reasoning" not in result:
-            result["reasoning"] = {"effort": thinking_effort}
+        thinking_effort = body.get("reasoning_effort") or _thinking_to_reasoning_effort(body.get("thinking"))
+    if thinking_effort:
+        result["reasoning"] = {"effort": thinking_effort}
 
     _copy_common_responses_params(body, result)
     _ensure_responses_reasoning_summary(result, body)
@@ -719,56 +451,15 @@ def _to_claude_request(body: dict[str, Any], source_api_type: str) -> dict[str, 
     if source_api_type == "claude" and "messages" in body:
         return _filter_fields(body, CLAUDE_FIELDS)
 
-    messages: list[dict[str, Any]] = []
-    system_parts = []
-
-    if source_api_type == "responses":
-        instructions = body.get("instructions")
-        if instructions:
-            system_parts.append(_content_to_text(instructions))
-
-        input_value = body.get("input", "")
-        if isinstance(input_value, str):
-            messages.append({"role": "user", "content": input_value})
-        elif isinstance(input_value, list):
-            for item in input_value:
-                if not isinstance(item, dict):
-                    messages.append({"role": "user", "content": str(item)})
-                    continue
-                role = item.get("role", "user")
-                content = _responses_content_to_claude(item.get("content", ""))
-                if role in ("system", "developer"):
-                    text = content if isinstance(content, str) else json.dumps(content, ensure_ascii=False)
-                    if text:
-                        system_parts.append(text)
-                elif role == "assistant":
-                    messages.append({"role": "assistant", "content": content})
-                else:
-                    messages.append({"role": "user", "content": content})
-        elif input_value:
-            messages.append({"role": "user", "content": str(input_value)})
-    else:
-        for msg in body.get("messages", []):
-            if not isinstance(msg, dict):
-                continue
-            role = msg.get("role", "")
-            content = msg.get("content", "")
-            if role in ("system", "developer"):
-                text = _content_to_text(content)
-                if text:
-                    system_parts.append(text)
-            elif role in ("user", "assistant"):
-                messages.append({"role": role, "content": _openai_content_to_claude(content)})
-            elif role == "tool":
-                messages.append({"role": "user", "content": json.dumps(msg, ensure_ascii=False)})
+    messages, system = _chat_as_claude(_messages_as_chat(body, source_api_type))
 
     result: dict[str, Any] = {
         "model": body.get("model", ""),
         "messages": messages,
         "max_tokens": body.get("max_output_tokens", body.get("max_completion_tokens", body.get("max_tokens", 1024))),
     }
-    if system_parts:
-        result["system"] = "\n".join(system_parts)
+    if system:
+        result["system"] = system
     _copy_if_present(body, result, "temperature")
     _copy_if_present(body, result, "top_p")
     _copy_if_present(body, result, "top_k")
@@ -883,6 +574,19 @@ def _to_responses_response(
     output_tokens = usage.get("output_tokens", usage.get("completion_tokens", 0)) or 0
     response_id = response_body.get("id", f"resp_{int(time.time())}")
 
+    output = []
+    for index, block in enumerate(_response_content_blocks(response_body, source_api_type)):
+        item_id = f"item_{response_id}_{index}"
+        if block["kind"] == "tool":
+            call = block["call"]
+            output.append({"id": item_id, "type": "function_call", "call_id": call["id"],
+                           "name": call["function"]["name"], "arguments": call["function"]["arguments"], "status": "completed"})
+        elif block["kind"] == "thinking":
+            output.append({"id": item_id, "type": "reasoning", "summary": [{"type": "summary_text", "text": block["text"]}]})
+        else:
+            output.append({"id": item_id, "type": "message", "role": "assistant", "status": "completed",
+                           "content": [{"type": "output_text", "text": block["text"], "annotations": []}]})
+
     return {
         "id": response_id,
         "object": "response",
@@ -893,15 +597,7 @@ def _to_responses_response(
         "instructions": original_request.get("instructions") or original_request.get("system"),
         "max_output_tokens": original_request.get("max_output_tokens") or original_request.get("max_tokens"),
         "model": response_body.get("model", original_request.get("model", "")),
-        "output": [
-            {
-                "id": f"msg_{response_id}",
-                "type": "message",
-                "status": "completed",
-                "role": "assistant",
-                "content": [{"type": "output_text", "text": text, "annotations": []}],
-            }
-        ],
+        "output": output,
         "output_text": text,
         "usage": {
             "input_tokens": input_tokens,
@@ -954,44 +650,17 @@ def _to_claude_response(
     input_tokens = usage.get("input_tokens", usage.get("prompt_tokens", 0)) or 0
     output_tokens = usage.get("output_tokens", usage.get("completion_tokens", 0)) or 0
 
-    content_blocks: list[dict[str, Any]] = []
-
-    if source_api_type == "responses":
-        output = response_body.get("output", [])
-        for item in (output if isinstance(output, list) else []):
-            if not isinstance(item, dict):
-                continue
-            if item.get("type") == "reasoning":
-                summary_text = ""
-                for summary in item.get("summary", []):
-                    if isinstance(summary, dict) and summary.get("type") == "summary_text":
-                        summary_text += summary.get("text", "")
-                if summary_text:
-                    content_blocks.append({"type": "thinking", "thinking": summary_text})
-            elif item.get("type") == "message":
-                for part in item.get("content", []):
-                    if isinstance(part, dict) and part.get("type") == "output_text":
-                        content_blocks.append({"type": "text", "text": part.get("text", "")})
-        if not content_blocks:
-            text = _extract_responses_text(response_body)
-            if text:
-                content_blocks.append({"type": "text", "text": text})
-    else:
-        choices = response_body.get("choices", [])
-        if isinstance(choices, list) and choices:
-            choice = choices[0] if isinstance(choices[0], dict) else {}
-            msg = choice.get("message", {}) if isinstance(choice.get("message"), dict) else {}
-            reasoning = msg.get("reasoning_content", "")
-            if reasoning:
-                content_blocks.append({"type": "thinking", "thinking": reasoning})
-            text = msg.get("content", "")
-            if text:
-                content_blocks.append({"type": "text", "text": text})
-        if not content_blocks:
-            text = _extract_openai_chat_text(response_body)
-            if text:
-                content_blocks.append({"type": "text", "text": text})
-
+    content_blocks = []
+    for block in _response_content_blocks(response_body, source_api_type):
+        if block["kind"] == "tool":
+            call = block["call"]
+            content_blocks.append({"type": "tool_use", "id": call["id"], "name": call["function"]["name"],
+                                   "input": _tool_arguments(call["function"]["arguments"])})
+        elif block["kind"] == "thinking":
+            content_blocks.append({"type": "thinking", "thinking": block["text"],
+                                   "signature": make_compat_thinking_signature()})
+        else:
+            content_blocks.append({"type": "text", "text": block["text"]})
     if not content_blocks:
         content_blocks.append({"type": "text", "text": ""})
 
@@ -1014,507 +683,213 @@ def _to_claude_response(
         "usage": {"input_tokens": input_tokens, "output_tokens": output_tokens},
     }
 
-def _ensure_sse_frame(chunk_data: str) -> str | None:
-    if not chunk_data:
-        return None
-    return chunk_data if chunk_data.endswith("\n\n") else f"{chunk_data}\n\n"
 
-def _patch_claude_sse_frame(chunk_data: str) -> str | None:
-    framed = _ensure_sse_frame(chunk_data)
-    if not framed:
-        return None
-
-    payload = _extract_sse_payload(framed)
-    if not payload:
-        return framed
-
-    event_type = payload.get("type", "")
-
-    if event_type == "content_block_start":
-        block = payload.get("content_block")
-        if not isinstance(block, dict):
-            return framed
-
-        needs_rebuild = False
-
-        if block.get("type") == "thinking":
-            if "signature" not in block:
-                block["signature"] = ""
-                needs_rebuild = True
-            _claude_passthrough_thinking_block_open.set(True)
-            _claude_passthrough_thinking_block_index.set(payload.get("index", 0))
-        elif block.get("type") == "text":
-            if "citations" not in block:
-                block["citations"] = None
-                needs_rebuild = True
-        elif block.get("type") == "tool_use":
-            if "citations" not in block:
-                block["citations"] = None
-                needs_rebuild = True
-
-        if needs_rebuild:
-            return f"event: {event_type}\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n"
-
-    if event_type == "content_block_stop":
-        thinking_active = _claude_passthrough_thinking_block_open.get()
-        thinking_idx = _claude_passthrough_thinking_block_index.get()
-        stop_idx = payload.get("index", -1)
-
-        if thinking_active and stop_idx == thinking_idx:
-            _claude_passthrough_thinking_block_open.set(False)
-            raw_sig = uuid.uuid4().hex + uuid.uuid4().hex
-            signature = base64.b64encode(raw_sig.encode()).decode()
-            sig_delta = f"event: content_block_delta\ndata: {json.dumps({'type': 'content_block_delta', 'index': thinking_idx, 'delta': {'type': 'signature_delta', 'signature': signature}}, ensure_ascii=False)}\n\n"
-            return sig_delta + framed
-
-    return framed
-
-def _extract_sse_payload(chunk_data: str) -> dict[str, Any] | None:
-    for line in chunk_data.strip().split("\n"):
-        if line.startswith("data:"):
-            data = line.replace("data:", "", 1).strip()
-            if not data or data == "[DONE]":
-                return None
-            try:
-                return json.loads(data)
-            except Exception:
-                return None
-    return None
-
-def _openai_stream_text(chunk_data: str) -> str:
-    payload = _extract_sse_payload(chunk_data)
-    if not payload:
-        return ""
-
-    if payload.get("type") == "response.output_text.delta":
-        return _stream_value_to_text(payload.get("delta", ""))
-
-    for key in (
-        "delta", "content", "text", "output_text", "reasoning_content",
-        "reasoning", "reasoning_text", "thinking", "thought",
-    ):
-        text = _stream_value_to_text(payload.get(key))
-        if text:
-            return text
-
-    choices = payload.get("choices", [])
-    if not choices:
-        return ""
-    choice = choices[0] if isinstance(choices[0], dict) else {}
-    delta = choice.get("delta", {})
-
-    text = _stream_value_to_text(delta)
-    if text:
-        return text
-
-    delta_dict = delta if isinstance(delta, dict) else {}
-    for key in (
-        "content", "text", "output_text", "reasoning_content", "reasoning",
-        "reasoning_text", "thinking", "thought",
-    ):
-        text = _stream_value_to_text(delta_dict.get(key))
-        if text:
-            return text
-
-    message = choice.get("message", {}) if isinstance(choice.get("message"), dict) else {}
-    for key in (
-        "content", "text", "output_text", "reasoning_content", "reasoning",
-        "reasoning_text", "thinking", "thought",
-    ):
-        text = _stream_value_to_text(message.get(key) or choice.get(key))
-        if text:
-            return text
-
-    return ""
-
-def _stream_value_to_text(value: Any) -> str:
-    if value is None:
-        return ""
-    if isinstance(value, str):
-        return value
-    if isinstance(value, (int, float)):
-        return str(value)
-    if isinstance(value, list):
-        return "".join(_stream_value_to_text(item) for item in value)
+def _tool_arguments(value: Any) -> dict[str, Any]:
     if isinstance(value, dict):
-        for key in (
-            "content", "text", "output_text", "delta", "value", "reasoning_content",
-            "reasoning", "reasoning_text", "thinking", "thought",
-        ):
-            text = _stream_value_to_text(value.get(key))
-            if text:
-                return text
-    return ""
+        return value
+    try:
+        parsed = json.loads(value or "{}")
+    except (TypeError, ValueError) as exc:
+        raise ValueError("Tool arguments must contain valid JSON") from exc
+    if not isinstance(parsed, dict):
+        raise ValueError("Tool arguments must be a JSON object")
+    return parsed
 
-def _claude_stream_text(chunk_data: str) -> str:
-    payload = _extract_sse_payload(chunk_data)
-    if not payload:
-        return ""
-    delta = payload.get("delta", {}) if isinstance(payload.get("delta"), dict) else {}
-    return _content_to_text(delta.get("text", ""))
 
-def _responses_stream_text(chunk_data: str) -> str:
-    payload = _extract_sse_payload(chunk_data)
-    if not payload:
-        return ""
-    if payload.get("type") == "response.output_text.delta":
-        return _content_to_text(payload.get("delta", ""))
-    return ""
+def _convert_tools(result: dict[str, Any], body: dict[str, Any], source: str, target: str) -> None:
+    if source == target:
+        return
+    if "tools" in body:
+        tools = []
+        for tool in body["tools"] or []:
+            if source == "claude":
+                if tool.get("type") not in (None, "custom"):
+                    raise ValueError("Provider-native tools cannot be converted between protocols")
+                fn = {"name": tool["name"], "parameters": tool.get("input_schema", {})}
+                if "description" in tool:
+                    fn["description"] = tool["description"]
+            else:
+                if tool.get("type") != "function":
+                    raise ValueError("Provider-native tools cannot be converted between protocols")
+                fn = dict(tool.get("function") or {}) if source == "openai" else {k: v for k, v in tool.items() if k != "type"}
+            if target == "openai":
+                tools.append({"type": "function", "function": fn})
+            elif target == "responses":
+                tools.append({"type": "function", **fn})
+            else:
+                converted = {"name": fn["name"], "input_schema": fn.get("parameters", {})}
+                if "description" in fn:
+                    converted["description"] = fn["description"]
+                tools.append(converted)
+        result["tools"] = tools
+    choice = body.get("tool_choice")
+    if choice is None and target == "claude" and body.get("tools") and body.get("parallel_tool_calls") is False:
+        choice = "auto"
+    if choice is not None:
+        name = None
+        if isinstance(choice, dict):
+            if source == "openai":
+                name = (choice.get("function") or {}).get("name")
+            else:
+                name = choice.get("name")
+            mode = choice.get("type", "auto")
+        else:
+            mode = choice
+        if target == "claude":
+            result["tool_choice"] = {"type": "tool", "name": name} if name else {"type": "any" if mode == "required" else mode}
+            if body.get("parallel_tool_calls") is False:
+                result["tool_choice"]["disable_parallel_tool_use"] = True
+        else:
+            mode = "required" if mode == "any" else mode
+            result["tool_choice"] = ({"type": "function", "function": {"name": name}} if target == "openai" else {"type": "function", "name": name}) if name else mode
+            if isinstance(choice, dict) and choice.get("disable_parallel_tool_use"):
+                result["parallel_tool_calls"] = False
 
-def _responses_stream_reasoning_text(chunk_data: str) -> str:
-    payload = _extract_sse_payload(chunk_data)
-    if not payload:
-        return ""
-    if payload.get("type") in (
-        "response.reasoning_summary_text.delta",
-        "response.reasoning_text.delta",
-    ):
-        return _content_to_text(payload.get("delta", ""))
-    return ""
 
-def _openai_stream_to_responses(chunk_data: str) -> str | None:
-    payload = _extract_sse_payload(chunk_data)
-    if isinstance(payload, dict) and str(payload.get("type", "")).startswith("response."):
-        event_type = payload.get("type", "response.event")
-        return f"event: {event_type}\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n"
+def _messages_as_chat(body: dict[str, Any], source: str) -> list[dict[str, Any]]:
+    if source == "openai":
+        return [dict(m) for m in body.get("messages", []) if isinstance(m, dict)]
+    messages: list[dict[str, Any]] = []
+    system = body.get("system") if source == "claude" else body.get("instructions")
+    if system:
+        messages.append({"role": "system", "content": _content_to_text(system)})
+    if source == "responses":
+        items = body.get("input", "")
+        if isinstance(items, str):
+            return messages + [{"role": "user", "content": items}]
+        for item in items or []:
+            if not isinstance(item, dict):
+                messages.append({"role": "user", "content": str(item)})
+            elif item.get("type") == "function_call":
+                call = {"id": item["call_id"], "type": "function", "function": {"name": item["name"], "arguments": item.get("arguments", "{}")}}
+                if messages and messages[-1].get("role") == "assistant" and "tool_calls" in messages[-1]:
+                    messages[-1]["tool_calls"].append(call)
+                else:
+                    messages.append({"role": "assistant", "content": None, "tool_calls": [call]})
+            elif item.get("type") == "function_call_output":
+                output = item.get("output", "")
+                messages.append({"role": "tool", "tool_call_id": item["call_id"], "content": output if isinstance(output, str) else json.dumps(output, ensure_ascii=False)})
+            elif item.get("type", "message") == "message":
+                messages.append({"role": item.get("role", "user"), "content": _responses_content_to_openai(item.get("content", ""))})
+        return messages
+    for msg in body.get("messages", []):
+        role, content = msg.get("role", "user"), msg.get("content", "")
+        if isinstance(content, str):
+            messages.append({"role": role, "content": content})
+            continue
+        parts, calls, results = [], [], []
+        for block in content or []:
+            kind = block.get("type")
+            if kind == "tool_use":
+                calls.append({"id": block["id"], "type": "function", "function": {"name": block["name"], "arguments": json.dumps(block.get("input", {}), ensure_ascii=False)}})
+            elif kind == "tool_result":
+                output = block.get("content", "")
+                results.append({"role": "tool", "tool_call_id": block["tool_use_id"], "content": output if isinstance(output, str) else _content_to_text(output)})
+            elif kind == "text":
+                parts.append({"type": "text", "text": block.get("text", "")})
+            elif kind == "image":
+                image = block.get("source") or {}
+                url = image.get("url") or f"data:{image.get('media_type', 'image/png')};base64,{image.get('data', '')}"
+                parts.append({"type": "image_url", "image_url": {"url": url}})
+        # Tool results must directly follow the assistant's tool call; any
+        # accompanying user text is a separate message after those results.
+        messages.extend(results)
+        if parts or calls:
+            converted: dict[str, Any] = {"role": role, "content": parts or None}
+            if calls:
+                converted["tool_calls"] = calls
+            messages.append(converted)
+    return messages
 
-    text = _openai_stream_text(chunk_data)
-    if not text:
-        return None
-    event_data = {
-        "type": "response.output_text.delta",
-        "output_index": 0,
-        "content_index": 0,
-        "delta": text,
-    }
-    return f"event: response.output_text.delta\ndata: {json.dumps(event_data, ensure_ascii=False)}\n\n"
 
-def _openai_stream_to_claude(
-    chunk_data: str,
-    state: ClaudeStreamState | None = None,
-) -> str | None:
-    if state is None:
-        text = _openai_stream_text(chunk_data)
-        if not text:
-            return None
-        event_data = {"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": text}}
-        return f"event: content_block_delta\ndata: {json.dumps(event_data, ensure_ascii=False)}\n\n"
+def _chat_as_responses(messages: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], str]:
+    items, instructions = [], []
+    for msg in messages:
+        role, content = msg.get("role", "user"), msg.get("content")
+        if role in ("system", "developer"):
+            instructions.append(_content_to_text(content))
+        elif role == "tool":
+            items.append({"type": "function_call_output", "call_id": msg["tool_call_id"], "output": content if isinstance(content, str) else json.dumps(content, ensure_ascii=False)})
+        else:
+            if content:
+                if isinstance(content, list):
+                    parts = []
+                    for part in content:
+                        if part.get("type") == "text":
+                            parts.append({"type": "output_text" if role == "assistant" else "input_text", "text": part.get("text", "")})
+                        elif part.get("type") == "image_url":
+                            parts.append({"type": "input_image", "image_url": part["image_url"]["url"]})
+                    content = parts
+                items.append({"role": role, "content": content})
+            for call in msg.get("tool_calls") or []:
+                fn = call.get("function") or {}
+                items.append({"type": "function_call", "call_id": call["id"], "name": fn["name"], "arguments": fn.get("arguments", "{}")})
+    return items, "\n".join(instructions)
 
-    payload = _extract_sse_payload(chunk_data)
-    if not payload:
-        return None
 
-    parts: list[str] = []
+def _chat_as_claude(messages: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], str]:
+    items, system = [], []
+    for msg in messages:
+        role, content = msg.get("role", "user"), msg.get("content")
+        if role in ("system", "developer"):
+            system.append(_content_to_text(content))
+            continue
+        if role == "tool":
+            converted = [{"type": "tool_result", "tool_use_id": msg["tool_call_id"], "content": content or ""}]
+            role = "user"
+        else:
+            converted = _openai_content_to_claude(content)
+            if isinstance(converted, str):
+                converted = [{"type": "text", "text": converted}] if converted else []
+            for call in msg.get("tool_calls") or []:
+                fn = call.get("function") or {}
+                converted.append({"type": "tool_use", "id": call["id"], "name": fn["name"], "input": _tool_arguments(fn.get("arguments"))})
+        if items and items[-1]["role"] == role:
+            items[-1]["content"].extend(converted)
+        else:
+            items.append({"role": role, "content": converted})
+    return items, "\n".join(system)
 
-    obj = payload.get("object", "")
-    choices = payload.get("choices", [])
-    choice = choices[0] if isinstance(choices, list) and choices else {}
-    delta = choice.get("delta", {}) if isinstance(choice, dict) else {}
-    finish_reason = choice.get("finish_reason") if isinstance(choice, dict) else None
-    model = payload.get("model", "")
 
-    if obj == "chat.completion.chunk" and delta.get("role") == "assistant":
-        parts.append(state.emit_message_start(model=model))
+def _response_tool_calls(body: dict[str, Any], source: str) -> list[dict[str, Any]]:
+    if source == "openai":
+        choices = body.get("choices") or [{}]
+        return (choices[0].get("message") or {}).get("tool_calls") or []
+    calls = []
+    for item in body.get("content" if source == "claude" else "output", []):
+        if source == "claude" and item.get("type") == "tool_use":
+            calls.append({"id": item["id"], "type": "function", "function": {
+                "name": item["name"], "arguments": json.dumps(item.get("input", {}), ensure_ascii=False)}})
+        elif source == "responses" and item.get("type") == "function_call":
+            calls.append({"id": item["call_id"], "type": "function", "function": {
+                "name": item["name"], "arguments": item.get("arguments", "{}")}})
+    return calls
 
-    reasoning = delta.get("reasoning_content", "")
-    if reasoning:
-        if not state.message_started:
-            parts.append(state.emit_message_start(model=model))
-        if not state.thinking_block_started:
-            parts.append(state.emit_thinking_start())
-        parts.append(state.emit_thinking_delta(reasoning))
 
-    content = delta.get("content", "")
-    if content:
-        if not state.message_started:
-            parts.append(state.emit_message_start(model=model))
-        if not state.text_block_started:
-            parts.append(state.emit_text_start())
-        parts.append(state.emit_text_delta(content))
-
-    if finish_reason:
-        stop_reason = "end_turn" if finish_reason == "stop" else finish_reason
-        if state.text_block_started and not state.text_block_stopped:
-            parts.append(state.emit_text_stop())
-        if state.thinking_block_started and not state.thinking_block_stopped:
-            parts.append(state.emit_thinking_stop())
-        if state.message_started and not state.message_stopped:
-            parts.append(state.emit_message_delta(stop_reason=stop_reason))
-            parts.append(state.emit_message_stop())
-
-    result = "".join(parts)
-    return result if result else None
-
-def _claude_stream_to_openai(chunk_data: str) -> str | None:
-    payload = _extract_sse_payload(chunk_data)
-    if not payload:
-        return None
-    event_type = payload.get("type", "")
-
-    if event_type == "message_start":
-        message = payload.get("message", {})
-        event_data = {
-            "id": message.get("id", "chatcmpl-stream"),
-            "object": "chat.completion.chunk",
-            "created": int(time.time()),
-            "model": message.get("model", ""),
-            "choices": [{"index": 0, "delta": {"role": "assistant", "content": ""}, "finish_reason": None}],
-        }
-        return f"data: {json.dumps(event_data, ensure_ascii=False)}\n\n"
-
-    elif event_type == "content_block_delta":
-        delta = payload.get("delta", {})
-        delta_type = delta.get("type", "")
-
-        if delta_type == "thinking_delta":
-            thinking = delta.get("thinking", "")
-            if thinking:
-                event_data = {
-                    "id": "chatcmpl-stream",
-                    "object": "chat.completion.chunk",
-                    "created": int(time.time()),
-                    "model": "",
-                    "choices": [{"index": 0, "delta": {"reasoning_content": thinking}, "finish_reason": None}],
-                }
-                return f"data: {json.dumps(event_data, ensure_ascii=False)}\n\n"
-
-        elif delta_type == "text_delta":
-            text = delta.get("text", "")
-            if text:
-                event_data = {
-                    "id": "chatcmpl-stream",
-                    "object": "chat.completion.chunk",
-                    "created": int(time.time()),
-                    "model": "",
-                    "choices": [{"index": 0, "delta": {"content": text}, "finish_reason": None}],
-                }
-                return f"data: {json.dumps(event_data, ensure_ascii=False)}\n\n"
-
-    elif event_type == "message_delta":
-        stop_reason = payload.get("delta", {}).get("stop_reason")
-        if stop_reason:
-            finish_reason = "stop" if stop_reason == "end_turn" else stop_reason
-            event_data = {
-                "id": "chatcmpl-stream",
-                "object": "chat.completion.chunk",
-                "created": int(time.time()),
-                "model": "",
-                "choices": [{"index": 0, "delta": {}, "finish_reason": finish_reason}],
-            }
-            return f"data: {json.dumps(event_data, ensure_ascii=False)}\n\n"
-
-    elif event_type == "message_stop":
-        return "data: [DONE]\n\n"
-
-    return None
-
-def _claude_stream_to_responses(chunk_data: str) -> str | None:
-    payload = _extract_sse_payload(chunk_data)
-    if not payload:
-        return None
-    event_type = payload.get("type", "")
-
-    if event_type == "message_start":
-        message = payload.get("message", {})
-        resp_id = message.get("id", f"resp_{int(time.time())}")
-        event_data = {
-            "type": "response.created",
-            "response": {
-                "id": resp_id,
-                "object": "response",
-                "created_at": int(time.time()),
-                "status": "in_progress",
-                "model": message.get("model", ""),
-                "output": [],
-            },
-        }
-        return f"event: response.created\ndata: {json.dumps(event_data, ensure_ascii=False)}\n\n"
-
-    elif event_type == "content_block_start":
-        block = payload.get("content_block", {})
-        block_type = block.get("type", "")
-        index = payload.get("index", 0)
-
-        if block_type == "thinking":
-            event_data = {
-                "type": "response.output_item.added",
-                "output_index": index,
-                "item": {
-                    "type": "reasoning",
-                    "id": f"rs_{int(time.time())}_{index}",
-                    "summary": [{"type": "summary_text", "text": ""}],
-                },
-            }
-            return f"event: response.output_item.added\ndata: {json.dumps(event_data, ensure_ascii=False)}\n\n"
-
-        elif block_type == "text":
-            parts = []
-            item_event = {
-                "type": "response.output_item.added",
-                "output_index": index,
-                "item": {
-                    "type": "message",
-                    "id": f"msg_{int(time.time())}_{index}",
-                    "status": "in_progress",
-                    "role": "assistant",
-                    "content": [],
-                },
-            }
-            parts.append(f"event: response.output_item.added\ndata: {json.dumps(item_event, ensure_ascii=False)}\n\n")
-            content_event = {
-                "type": "response.content_part.added",
-                "output_index": index,
-                "content_index": 0,
-                "part": {"type": "output_text", "text": ""},
-            }
-            parts.append(f"event: response.content_part.added\ndata: {json.dumps(content_event, ensure_ascii=False)}\n\n")
-            return "".join(parts)
-
-    elif event_type == "content_block_delta":
-        delta = payload.get("delta", {})
-        delta_type = delta.get("type", "")
-        index = payload.get("index", 0)
-
-        if delta_type == "thinking_delta":
-            thinking = delta.get("thinking", "")
-            if thinking:
-                event_data = {
-                    "type": "response.reasoning_summary_text.delta",
-                    "output_index": index,
-                    "summary_index": 0,
-                    "delta": thinking,
-                }
-                return f"event: response.reasoning_summary_text.delta\ndata: {json.dumps(event_data, ensure_ascii=False)}\n\n"
-
-        elif delta_type == "text_delta":
-            text = delta.get("text", "")
-            if text:
-                event_data = {
-                    "type": "response.output_text.delta",
-                    "output_index": index,
-                    "content_index": 0,
-                    "delta": text,
-                }
-                return f"event: response.output_text.delta\ndata: {json.dumps(event_data, ensure_ascii=False)}\n\n"
-
-    elif event_type == "message_stop":
-        event_data = {
-            "type": "response.completed",
-            "response": {
-                "id": f"resp_{int(time.time())}",
-                "object": "response",
-                "created_at": int(time.time()),
-                "status": "completed",
-            },
-        }
-        return f"event: response.completed\ndata: {json.dumps(event_data, ensure_ascii=False)}\n\n"
-
-    return None
-
-def _responses_stream_to_openai(chunk_data: str) -> str | None:
-    reasoning_text = _responses_stream_reasoning_text(chunk_data)
-    if reasoning_text:
-        event_data = {
-            "id": "chatcmpl-stream",
-            "object": "chat.completion.chunk",
-            "created": int(time.time()),
-            "choices": [{"index": 0, "delta": {"reasoning_content": reasoning_text}, "finish_reason": None}],
-        }
-        return f"data: {json.dumps(event_data, ensure_ascii=False)}\n\n"
-
-    text = _responses_stream_text(chunk_data)
-    if not text:
-        return None
-    event_data = {
-        "id": "chatcmpl-stream",
-        "object": "chat.completion.chunk",
-        "created": int(time.time()),
-        "choices": [{"index": 0, "delta": {"content": text}, "finish_reason": None}],
-    }
-    return f"data: {json.dumps(event_data, ensure_ascii=False)}\n\n"
-
-def _responses_stream_to_claude(
-    chunk_data: str,
-    state: ClaudeStreamState | None = None,
-) -> str | None:
-    if state is None:
-        reasoning_text = _responses_stream_reasoning_text(chunk_data)
-        if reasoning_text:
-            event_data = {
-                "type": "content_block_delta",
-                "index": 0,
-                "delta": {"type": "thinking_delta", "thinking": reasoning_text},
-            }
-            return f"event: content_block_delta\ndata: {json.dumps(event_data, ensure_ascii=False)}\n\n"
-
-        text = _responses_stream_text(chunk_data)
-        if not text:
-            return None
-        event_data = {"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": text}}
-        return f"event: content_block_delta\ndata: {json.dumps(event_data, ensure_ascii=False)}\n\n"
-
-    payload = _extract_sse_payload(chunk_data)
-    if not payload:
-        return None
-
-    event_type = payload.get("type", "")
-    parts: list[str] = []
-
-    if event_type == "response.created":
-        resp = payload.get("response", {})
-        model = resp.get("model", "")
-        msg_id = resp.get("id", "")
-        parts.append(state.emit_message_start(model=model, msg_id=msg_id))
-
-    elif event_type == "response.output_item.added":
-        item = payload.get("item", {})
-        item_type = item.get("type", "")
-        if item_type == "reasoning":
-            if not state.message_started:
-                parts.append(state.emit_message_start())
-            if not state.thinking_block_started:
-                parts.append(state.emit_thinking_start())
-        elif item_type == "message":
-            if not state.message_started:
-                parts.append(state.emit_message_start())
-            if not state.text_block_started:
-                parts.append(state.emit_text_start())
-
-    elif event_type == "response.content_part.added":
-        if not state.message_started:
-            parts.append(state.emit_message_start())
-        if not state.text_block_started:
-            parts.append(state.emit_text_start())
-
-    elif event_type in ("response.reasoning_summary_text.delta", "response.reasoning_text.delta"):
-        reasoning = payload.get("delta", "")
+def _response_content_blocks(body: dict[str, Any], source: str) -> list[dict[str, Any]]:
+    blocks: list[dict[str, Any]] = []
+    if source == "openai":
+        choices = body.get("choices") or [{}]
+        message = choices[0].get("message") or {}
+        reasoning = message.get("reasoning_content") or message.get("reasoning")
         if reasoning:
-            if not state.message_started:
-                parts.append(state.emit_message_start())
-            if not state.thinking_block_started:
-                parts.append(state.emit_thinking_start())
-            parts.append(state.emit_thinking_delta(str(reasoning)))
-
-    elif event_type == "response.output_text.delta":
-        text = payload.get("delta", "")
+            blocks.append({"kind": "thinking", "text": reasoning})
+        text = _extract_openai_chat_text(body)
         if text:
-            if not state.message_started:
-                parts.append(state.emit_message_start())
-            if not state.text_block_started:
-                parts.append(state.emit_text_start())
-            parts.append(state.emit_text_delta(str(text)))
-
-    elif event_type == "response.completed":
-        if state.text_block_started and not state.text_block_stopped:
-            parts.append(state.emit_text_stop())
-        if state.thinking_block_started and not state.thinking_block_stopped:
-            parts.append(state.emit_thinking_stop())
-        if state.message_started and not state.message_stopped:
-            resp = payload.get("response", {})
-            status = resp.get("status", "completed")
-            stop_reason = "end_turn" if status == "completed" else status
-            parts.append(state.emit_message_delta(stop_reason=stop_reason))
-            parts.append(state.emit_message_stop())
-
-    result = "".join(parts)
-    return result if result else None
+            blocks.append({"kind": "text", "text": text})
+        blocks.extend({"kind": "tool", "call": c} for c in _response_tool_calls(body, source))
+        return blocks
+    for item in body.get("content" if source == "claude" else "output", []):
+        kind = item.get("type")
+        if kind in ("text", "thinking"):
+            blocks.append({"kind": kind, "text": item.get("text") or item.get("thinking", "")})
+        elif kind == "message":
+            blocks.extend({"kind": "text", "text": part.get("text", "")} for part in item.get("content", []) if part.get("type") == "output_text")
+        elif kind == "reasoning":
+            for parts in (item.get("summary") or [], item.get("content") or []):
+                blocks.extend({"kind": "thinking", "text": part.get("text", "")} for part in parts
+                              if part.get("type") in ("summary_text", "reasoning_text", "text"))
+        elif kind in ("tool_use", "function_call"):
+            wrapped = {"content" if source == "claude" else "output": [item]}
+            blocks.extend({"kind": "tool", "call": c} for c in _response_tool_calls(wrapped, source))
+    return blocks
