@@ -21,6 +21,7 @@ const model = {
   id: 'm-1',
   name: 'model-a',
   display_name: '测试模型',
+  icon: 'auto',
   routing_strategy: 'default',
   channel_refs: [],
   supports_thinking: true,
@@ -483,6 +484,7 @@ test('model editing preserves routing payload and independently saves channel ta
   expect((await modelPromise).postDataJSON()).toEqual({
     name: 'model-a',
     display_name: '修改后的模型',
+    icon: 'auto',
     routing_strategy: 'weighted',
     custom_js: '',
     failover_enabled: false,
@@ -658,7 +660,7 @@ test('channel probe checkboxes and prompt health settings retain their payloads'
   await expect(page.getByRole('combobox', { name: '探测模型', exact: true })).toHaveText(/model-a/)
   await page.getByRole('textbox', { name: '上游模型列表', exact: true }).fill('')
   await button(page, '保存').click()
-  await expect(page.getByRole('status')).toContainText('Prompt 探测需要先配置上游模型')
+  await expect(page.locator('.message-text[role="status"]')).toContainText('Prompt 探测需要先配置上游模型')
   expect(errors).toEqual([])
 })
 
@@ -715,5 +717,95 @@ test('short mobile viewport, dark surfaces, Escape selection and Ctrl+S work', a
     config: { enabled: true },
   })
   await expect(page.getByRole('dialog')).toHaveCount(0)
+  expect(errors).toEqual([])
+})
+
+test('manual model icon persists, overrides auto detection, and can be reset', async ({ page }) => {
+  const errors = await fixtures(page)
+  let saved = { ...model, name: 'gpt-4o', icon: 'auto' }
+  await page.route('**/api/admin/models', route => route.fulfill({ json: { data: [saved] } }))
+  await page.route('**/api/admin/models/m-1', async route => {
+    if (route.request().method() === 'PUT') saved = { ...saved, ...route.request().postDataJSON() }
+    await route.fulfill({ json: saved })
+  })
+  await page.route('**/api/admin/logs?**', route => route.fulfill({ json: { data: [{ ...log, model: 'gpt-4o' }], total: 1 } }))
+  await page.goto('/models')
+  await expect(page.locator('.model-card [data-brand="openai"]')).toBeVisible()
+  await button(page, '配置模型').click()
+  await select(page, '模型图标', 'DeepSeek')
+  await expect(page.locator('.model-icon-editor > [data-brand="deepseek"]')).toBeVisible()
+  const request = page.waitForRequest(r => r.method() === 'PUT' && r.url().endsWith('/api/admin/models/m-1'))
+  await button(page, '保存').click()
+  expect((await request).postDataJSON()).toMatchObject({ icon: 'deepseek', name: 'gpt-4o', routing_strategy: 'default' })
+  await page.reload()
+  await expect(page.locator('.model-card [data-brand="deepseek"]')).toBeVisible()
+  await page.goto('/logs')
+  await expect(page.locator('fluent-data-grid .model-label [data-brand="deepseek"]')).toBeVisible()
+  await page.goto('/playground')
+  await expect(page.locator('.chat-header [data-brand="deepseek"]')).toBeVisible()
+  await page.goto('/models')
+  await button(page, '配置模型').click()
+  await select(page, '模型图标', '自动识别')
+  await button(page, '保存').click()
+  await expect(page.locator('.model-card [data-brand="openai"]')).toBeVisible()
+  await button(page, '配置模型').click()
+  await select(page, '模型图标', '通用图标')
+  await button(page, '保存').click()
+  await expect(page.locator('.model-card [data-brand="unknown"]')).toBeVisible()
+  expect(saved.icon).toBe('generic')
+  expect(errors).toEqual([])
+})
+
+test('model catalog recognizes families and aliases without guessing mixed or unknown providers', async ({ page }) => {
+  const errors = await fixtures(page)
+  const catalog = [
+    { name: 'openrouter/anthropic/claude-sonnet-4-5', brand: 'claude' },
+    { name: 'Qwen/Qwen3-235B', brand: 'qwen' },
+    { name: 'o3-mini', brand: 'openai' },
+    { name: 'mygpt-custom', brand: 'unknown' },
+    { name: 'alias', brand: 'gemini', upstream: ['gemini-2.5-pro', 'gemini-2.5-flash'] },
+    { name: 'mixed', brand: 'unknown', upstream: ['claude-sonnet-4-5', 'gpt-4o'] },
+    { name: 'partial', brand: 'unknown', upstream: ['deepseek-chat', 'unknown'] },
+    { name: 'custom-' + 'long-name-'.repeat(14), brand: 'unknown' },
+  ]
+  await page.route('**/api/admin/models', route => route.fulfill({ json: { data: catalog.map((item, index) => ({
+    ...model, id: String(index), name: item.name, display_name: item.name,
+    channel_refs: (item.upstream || []).map((upstream_model_id, id) => ({ id, upstream_model_id, weight: 1 })),
+  })) } }))
+  await page.goto('/models')
+  await expect(page.locator('.model-card')).toHaveCount(catalog.length)
+  for (let index = 0; index < catalog.length; index++)
+    await expect(page.locator('.model-card').nth(index).locator('.model-icon')).toHaveAttribute('data-brand', catalog[index].brand)
+  await select(page, '模型品牌', 'Gemini')
+  await expect(page.locator('.model-card')).toHaveCount(1)
+  await expect(page.locator('.model-card')).toContainText('alias')
+  await page.locator('fluent-text-field[aria-label="搜索模型"] input').fill('no-match')
+  await expect(page.getByText('没有匹配的模型', { exact: true })).toBeVisible()
+  await button(page, '清除筛选').last().click()
+  await page.locator('fluent-text-field[aria-label="搜索模型"] input').fill('GEMINI-2.5-FLASH')
+  await expect(page.locator('.model-card')).toHaveCount(1)
+  await button(page, '清除筛选').click()
+  await page.emulateMedia({ colorScheme: 'dark', reducedMotion: 'reduce' })
+  await page.setViewportSize({ width: 375, height: 680 })
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true)
+  await expect(page.locator('.model-card').first()).toHaveCSS('animation-name', 'none')
+  await expect.poll(() => page.locator('.model-icon img').evaluateAll(images => images.every(img => (img as HTMLImageElement).complete && (img as HTMLImageElement).naturalWidth > 0))).toBe(true)
+  expect(errors).toEqual([])
+})
+
+test('channel search and health filters work together and clear without changing data', async ({ page }) => {
+  const errors = await fixtures(page)
+  await page.route('**/api/admin/channels', route => route.fulfill({ json: { data: [
+    channel,
+    { ...channel, id: 'ch-2', name: '备用渠道', provider: 'anthropic', health_status: 'unhealthy' },
+  ] } }))
+  await page.goto('/channels')
+  await select(page, '渠道健康状态', '异常')
+  await expect(page.locator('fluent-data-grid-row:not([row-type="header"])')).toHaveCount(1)
+  await expect(page.locator('fluent-data-grid')).toContainText('备用渠道')
+  await page.locator('fluent-text-field[aria-label="搜索渠道"] input').fill('openai')
+  await expect(page.getByText('暂无数据', { exact: true })).toBeVisible()
+  await button(page, '清除筛选').click()
+  await expect(page.locator('fluent-data-grid-row:not([row-type="header"])')).toHaveCount(2)
   expect(errors).toEqual([])
 })

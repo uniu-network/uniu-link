@@ -1,5 +1,6 @@
 <template>
   <div class="app-layout" :class="{ 'sidebar-collapsed': collapsed }">
+    <a class="skip-link" href="#main">跳转到主要内容</a>
     <Transition name="sidebar-scrim"
       ><div
         v-if="isNarrow && !collapsed"
@@ -27,20 +28,23 @@
         </div>
       </div>
       <nav id="admin-navigation" class="navigation" aria-label="管理导航">
-        <RouterLink
-          v-for="item in menuItems"
-          :key="item.path"
-          :to="item.path"
-          class="navigation-item"
-          :class="{ 'navigation-item-selected': selected(item.path) }"
-          :aria-current="selected(item.path) ? 'page' : undefined"
-          :aria-label="item.label"
-          :title="collapsed ? item.label : undefined"
-          @click="navigated"
-          ><NavIcon :name="item.icon" /><span class="navigation-label" :aria-hidden="collapsed">{{
-            item.label
-          }}</span></RouterLink
-        >
+        <section v-for="group in menuGroups" :key="group.label" class="navigation-group" :aria-label="group.label">
+          <p class="navigation-group-label" :aria-hidden="collapsed">{{ group.label }}</p>
+          <RouterLink
+            v-for="item in group.items"
+            :key="item.path"
+            :to="item.path"
+            class="navigation-item"
+            :class="{ 'navigation-item-selected': selected(item.path) }"
+            :aria-current="selected(item.path) ? 'page' : undefined"
+            :aria-label="item.label"
+            :title="collapsed ? item.label : undefined"
+            @click="navigated"
+            ><NavIcon :name="item.icon" /><span class="navigation-label" :aria-hidden="collapsed">{{
+              item.label
+            }}</span></RouterLink
+          >
+        </section>
       </nav>
       <div class="sidebar-footer">
         <div class="sidebar-action"><ThemeToggle :collapsed="collapsed" /></div>
@@ -71,7 +75,7 @@
         </div>
       </div>
     </aside>
-    <main id="main" class="main-content" :inert="isNarrow && !collapsed"><slot /></main>
+    <main id="main" class="main-content" tabindex="-1" :inert="isNarrow && !collapsed"><slot /></main>
   </div>
 </template>
 <script setup lang="ts">
@@ -88,15 +92,21 @@ const screen = window.matchMedia('(max-width: 700px)')
 const isNarrow = ref(screen.matches)
 const collapsed = ref(screen.matches)
 const signingOut = ref(false)
-const menuItems = [
-  { path: '/', label: '仪表盘', icon: 'dashboard' },
-  { path: '/channels', label: '渠道管理', icon: 'server' },
-  { path: '/models', label: '模型管理', icon: 'model' },
-  { path: '/playground', label: '演练场', icon: 'comment' },
-  { path: '/logs', label: '请求日志', icon: 'document' },
-  { path: '/api-keys', label: 'API 密钥', icon: 'key' },
-  { path: '/plugins', label: '插件管理', icon: 'plugin' },
-  { path: '/config', label: '系统配置', icon: 'settings' },
+const menuGroups = [
+  { label: '工作台', items: [
+    { path: '/', label: '仪表盘', icon: 'dashboard' },
+    { path: '/playground', label: '演练场', icon: 'comment' },
+  ] },
+  { label: '网关管理', items: [
+    { path: '/channels', label: '渠道管理', icon: 'server' },
+    { path: '/models', label: '模型管理', icon: 'model' },
+    { path: '/api-keys', label: 'API 密钥', icon: 'key' },
+  ] },
+  { label: '系统与观测', items: [
+    { path: '/logs', label: '请求日志', icon: 'document' },
+    { path: '/plugins', label: '插件管理', icon: 'plugin' },
+    { path: '/config', label: '系统配置', icon: 'settings' },
+  ] },
 ]
 function selected(path: string) {
   return path === '/'

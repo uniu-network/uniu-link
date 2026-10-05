@@ -7,9 +7,15 @@
       ></PageHeader
     >
     <ListState :error="loadError" @retry="load" />
-    <UiSpinner v-if="!loadError" :show="loading"
-      ><UiDataTable :columns="columns" :data="channels"
-    /></UiSpinner>
+    <UiSpinner v-if="!loadError" :show="loading">
+      <div class="list-toolbar" role="search" aria-label="筛选渠道">
+        <UiInput v-model="search" type="search" aria-label="搜索渠道" placeholder="搜索渠道名称、提供商或地址" class="search-input" />
+        <UiSelect v-model="healthFilter" :options="healthFilterOptions" aria-label="渠道健康状态" />
+        <span class="secondary-text" role="status">显示 {{ filteredChannels.length }} / {{ channels.length }} 个渠道</span>
+        <UiButton v-if="search || healthFilter" variant="link" @click="search = ''; healthFilter = ''">清除筛选</UiButton>
+      </div>
+      <UiDataTable :columns="columns" :data="filteredChannels" label="渠道列表" />
+    </UiSpinner>
 
     <UiDrawer
       v-model:open="dialogVisible"
@@ -176,6 +182,8 @@ import { useUnsavedForm } from '@/composables/useUnsavedChanges'
 import PageHeader from '@/components/PageHeader.vue'
 import ListState from '@/components/ListState.vue'
 import NavIcon from '@/components/NavIcon.vue'
+import ModelLabel from '@/components/ModelLabel.vue'
+import { resolveProviderIdentity } from '@/utils/modelIdentity'
 
 import UiField from '@/components/ui/UiField.vue'
 import UiInput from '@/components/ui/UiInput.vue'
@@ -214,6 +222,19 @@ const Help = defineComponent({
 const toast = useToast()
 const confirm = useConfirm()
 const channels = ref<any[]>([])
+const search = ref('')
+const healthFilter = ref('')
+const healthFilterOptions = [
+  { label: '全部状态', value: '' },
+  { label: '健康', value: 'healthy' },
+  { label: '异常', value: 'unhealthy' },
+  { label: '未知', value: 'unknown' },
+]
+const filteredChannels = computed(() => {
+  const query = search.value.trim().toLowerCase()
+  return channels.value.filter(channel => (!healthFilter.value || (channel.health_status || 'unknown') === healthFilter.value)
+    && (!query || [channel.name, channel.provider, channel.base_url].some(value => value?.toLowerCase().includes(query))))
+})
 const loading = ref(true)
 const loadError = ref('')
 const dialogVisible = ref(false)
@@ -470,33 +491,27 @@ async function deleteItem(id: string) {
 }
 
 const columns = [
-  { title: '名称', key: 'name' },
-  { title: '提供商', key: 'provider' },
+  { title: '渠道', key: 'name', render: (row: any) => h('div', { class: 'table-cell-stack' }, [
+    h('strong', row.name),
+    h(ModelLabel, { provider: row.provider, label: resolveProviderIdentity(row.provider).label, class: 'secondary-text' }),
+  ]) },
+  { title: '连接地址', key: 'base_url', render: (row: any) => h('div', { class: 'table-cell-stack' }, [
+    h('span', row.base_url),
+    h('span', { class: 'secondary-text' }, `${Object.keys(row.custom_headers || {}).length} 个自定义请求头`),
+  ]) },
   { title: '接口类型', key: 'api_type', render: (row: any) => apiTypeLabel(row.api_type) },
-  {
-    title: '自定义请求头',
-    key: 'custom_headers',
-    render: (row: any) => `${Object.keys(row.custom_headers || {}).length} 个`,
-  },
-  { title: '地址', key: 'base_url' },
-  { title: '默认权重', key: 'default_weight' },
-  {
-    title: '上游模型',
-    key: 'upstream_models',
-    render: (row: any) => (row.upstream_models?.length || 0) + ' 个',
-  },
-  {
-    title: '检测模式',
-    key: 'health_check_mode',
-    render: (row: any) => (row.health_check_mode === 'prompt' ? 'Prompt' : '模型列表'),
-  },
+  { title: '模型 / 权重', key: 'upstream_models', width: 110, render: (row: any) => h('div', { class: 'table-cell-stack' }, [
+    h('span', `${row.upstream_models?.length || 0} 个模型`),
+    h('span', { class: 'secondary-text' }, `默认权重 ${row.default_weight}`),
+  ]) },
   {
     title: '健康状态',
     key: 'health_status',
-    render: (row: any) =>
+    width: 110,
+    render: (row: any) => h('div', { class: 'table-cell-stack' }, [
       h(
         UiBadge,
-        { variant: row.health_status === 'healthy' ? 'success' : 'danger' },
+        { variant: row.health_status === 'healthy' ? 'success' : row.health_status === 'unhealthy' ? 'danger' : 'default' },
         {
           default: () =>
             (({ healthy: '健康', unhealthy: '异常', unknown: '未知' }) as Record<string, string>)[
@@ -504,10 +519,13 @@ const columns = [
             ] || row.health_status,
         }
       ),
+      h('span', { class: 'secondary-text' }, row.health_check_mode === 'prompt' ? 'Prompt 探测' : '模型列表探测'),
+    ]),
   },
   {
     title: '熔断状态',
     key: 'circuit_state',
+    width: 110,
     render: (row: any) =>
       h(
         UiBadge,

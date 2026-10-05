@@ -1,5 +1,5 @@
 <template>
-  <fluent-badge
+  <fluent-badge appearance="neutral"
     ><span class="badge-content"
       ><NavIcon
         v-if="semantic"

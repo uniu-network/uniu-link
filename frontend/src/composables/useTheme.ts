@@ -2,6 +2,8 @@ import { computed, readonly, ref } from 'vue'
 import {
   accentBaseColor,
   baseLayerLuminance,
+  controlCornerRadius,
+  layerCornerRadius,
   StandardLuminance,
   SwatchRGB,
 } from '@fluentui/web-components'
@@ -37,6 +39,8 @@ export function setThemePreference(value: ThemePreference): void {
 }
 
 export function applyTheme(): void {
+  controlCornerRadius.withDefault(6)
+  layerCornerRadius.withDefault(12)
   const channel = (offset: number) => Number.parseInt(brandPink.slice(offset, offset + 2), 16) / 255
   accentBaseColor.withDefault(SwatchRGB.create(channel(1), channel(3), channel(5)))
   document.documentElement.style.setProperty('--brand-pink', brandPink)

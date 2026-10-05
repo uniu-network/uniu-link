@@ -52,7 +52,11 @@
                 :aria-label="`移除模型 ${m}`"
                 @click="removeModel(m)"
                 ><NavIcon name="close" :size="16" /></UiButton
-              >{{ m }}</UiBadge
+              ><ModelLabel
+                :model="m"
+                :icon="availableModels.find(item => item.name === m)?.icon"
+                :upstream-models="upstreamModelNames(availableModels.find(item => item.name === m))"
+              /></UiBadge
             >
           </div>
           <p v-else class="text-sm text-muted-foreground">请至少添加一个模型，否则密钥将无法使用</p>
@@ -99,6 +103,8 @@ import { useUnsavedForm } from '@/composables/useUnsavedChanges'
 import PageHeader from '@/components/PageHeader.vue'
 import ListState from '@/components/ListState.vue'
 import NavIcon from '@/components/NavIcon.vue'
+import ModelLabel from '@/components/ModelLabel.vue'
+import { upstreamModelNames, type ModelPresentation } from '@/utils/modelIdentity'
 
 import UiField from '@/components/ui/UiField.vue'
 import UiInput from '@/components/ui/UiInput.vue'
@@ -130,7 +136,7 @@ const togglingId = ref('')
 const newKeyDialogVisible = ref(false)
 const newKeyValue = ref('')
 const copied = ref(false)
-const availableModels = ref<string[]>([])
+const availableModels = ref<ModelPresentation[]>([])
 const selectedModel = ref('')
 const expiresAtLocal = ref('')
 const form = ref<any>({
@@ -145,7 +151,7 @@ const form = ref<any>({
 })
 
 const modelSelectOptions = computed(() =>
-  availableModels.value.map((m: string) => ({ label: m, value: m }))
+  availableModels.value.map(m => ({ label: m.name, value: m.name, model: m.name, icon: m.icon, upstreamModels: upstreamModelNames(m) }))
 )
 function usagePercent(k: any) {
   if (!k.max_tokens || k.max_tokens <= 0) return 0
@@ -219,7 +225,7 @@ const columns = [
             { class: 'flex flex-wrap gap-1' },
             row.allowed_models
               .slice(0, 3)
-              .map((m: string) => h(UiBadge, { variant: 'info' }, { default: () => m }))
+              .map((m: string) => h(ModelLabel, { model: m, icon: availableModels.value.find(item => item.name === m)?.icon, upstreamModels: upstreamModelNames(availableModels.value.find(item => item.name === m)) }))
               .concat(
                 row.allowed_models.length > 3
                   ? [h(UiBadge, null, { default: () => `+${row.allowed_models.length - 3}` })]
@@ -281,7 +287,7 @@ async function load() {
 
 async function loadModelNames() {
   try {
-    availableModels.value = ((await listModels()).data || []).map((m: any) => m.name)
+    availableModels.value = (await listModels()).data || []
   } catch {
     availableModels.value = []
   }

@@ -5,7 +5,7 @@
         generate-header="none"
         :aria-label="label"
         :grid-template-columns="gridColumns"
-        :style="{ minWidth: `${Math.max(760, columns.length * 140)}px` }"
+        :style="{ minWidth: `${minWidth}px` }"
         @keydown.capture="gridKeydown"
       >
         <fluent-data-grid-row row-type="header">
@@ -17,7 +17,7 @@
             >{{ column.title }}</fluent-data-grid-cell
           >
         </fluent-data-grid-row>
-        <fluent-data-grid-row v-for="(row, rowIndex) in data" :key="row.id || row.key || rowIndex">
+        <fluent-data-grid-row v-for="(row, rowIndex) in data" :key="row.id || row.key || rowIndex" class="reveal-item" :style="{ '--reveal-index': Math.min(rowIndex, 7) }">
           <fluent-data-grid-cell
             v-for="(column, index) in columns"
             :key="column.key"
@@ -38,6 +38,7 @@ import UiEmpty from './UiEmpty.vue'
 export interface UiTableColumn {
   title: string
   key: string
+  width?: number
   render?: (row: any) => VNode | string | number | null
 }
 const props = withDefaults(
@@ -64,14 +65,21 @@ function gridKeydown(event: KeyboardEvent) {
     event.stopPropagation()
   }
 }
+function isWideColumn(column: UiTableColumn) {
+  return ['description', 'base_url', 'module_path'].includes(column.key)
+}
+const minWidth = computed(() => Math.max(760, props.columns.reduce((total, column) =>
+  total + (column.width || (column.key === 'actions' ? 80 : isWideColumn(column) ? 190 : 140)), 0)))
 const gridColumns = computed(() =>
   props.columns
     .map((column) =>
-      column.key === 'actions'
-        ? '80px'
-        : column.key === 'description' || column.key === 'base_url' || column.key === 'module_path'
-          ? 'minmax(190px, 2fr)'
-          : 'minmax(140px, 1fr)'
+      column.width
+        ? `minmax(${column.width}px, 1fr)`
+        : column.key === 'actions'
+          ? '80px'
+          : isWideColumn(column)
+            ? 'minmax(190px, 2fr)'
+            : 'minmax(140px, 1fr)'
     )
     .join(' ')
 )

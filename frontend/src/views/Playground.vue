@@ -10,11 +10,12 @@
       <fluent-card class="ui-card"
         ><section class="chat-shell">
           <header class="chat-header">
-            <div>
-              <h2>会话</h2>
+            <div class="chat-identity">
+              <ModelIcon :model="selectedModel" :icon="selectedModelConfig?.icon" :upstream-models="upstreamModelNames(selectedModelConfig)" :size="24" framed />
+              <div><h2>会话</h2>
               <p class="secondary-text">
                 {{ selectedModel || '未选择模型' }} · {{ selectedApiLabel }}
-              </p>
+              </p></div>
             </div>
             <UiButton
               variant="ghost"
@@ -35,7 +36,7 @@
                 description="选择协议和模型，输入消息后发送。"
                 ><template #icon><NavIcon name="comment" /></template
               ></UiEmpty>
-              <article v-for="item in messages" :key="item.id" class="chat-message">
+              <article v-for="item in messages" :key="item.id" class="chat-message reveal-item" :class="{ 'chat-message-user': item.role === 'user' }">
                 <p
                   class="chat-role"
                   :class="
@@ -46,6 +47,7 @@
                         : ''
                   "
                 >
+                  <ModelIcon v-if="item.role === 'assistant'" :model="item.model" :icon="modelConfig(item.model)?.icon" :upstream-models="upstreamModelNames(modelConfig(item.model))" :size="18" />
                   {{ item.role === 'user' ? '你' : item.role === 'error' ? '错误' : '模型' }}
                 </p>
                 <details v-if="item.thinking" open class="chat-thinking">
@@ -171,6 +173,8 @@
 <script setup lang="ts">
 import PageHeader from '@/components/PageHeader.vue'
 import NavIcon from '@/components/NavIcon.vue'
+import ModelIcon from '@/components/ModelIcon.vue'
+import { upstreamModelNames } from '@/utils/modelIdentity'
 import ListState from '@/components/ListState.vue'
 import UiCard from '@/components/ui/UiCard.vue'
 
@@ -212,6 +216,7 @@ type ApiMode = 'openai_responses' | 'openai_chat' | 'claude_messages'
 type ChatRole = 'user' | 'assistant' | 'error'
 
 interface ChatMessage {
+  model?: string
   id: number
   role: ChatRole
   content: string
@@ -239,10 +244,16 @@ const apiModeOptions = [
   { label: 'Claude Messages', value: 'claude_messages' },
 ]
 
+const modelConfig = (name?: string) => models.value.find(m => m.name === name)
+const selectedModelConfig = computed(() => modelConfig(selectedModel.value))
+
 const modelOptions = computed(() =>
   models.value.map((m) => ({
     label: m.display_name || m.name,
     value: m.name,
+    model: m.name,
+    icon: m.icon,
+    upstreamModels: upstreamModelNames(m),
   }))
 )
 
@@ -543,6 +554,7 @@ async function sendMessage() {
   const assistantMessage: ChatMessage = {
     id: nextId(),
     role: 'assistant',
+    model: selectedModel.value,
     content: '',
     thinking: '',
   }

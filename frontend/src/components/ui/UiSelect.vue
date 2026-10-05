@@ -16,18 +16,24 @@
       :value="option.value"
       :disabled="option.disabled"
       :selected.prop="option.value === displayValue && !option.disabled"
-      >{{ option.label }}</fluent-option
+      ><span v-if="option.model || option.icon" slot="start" aria-hidden="true" class="option-icon">
+        <ModelIcon :model="option.model" :icon="option.icon" :upstream-models="option.upstreamModels" :size="16" />
+      </span>{{ option.label }}</fluent-option
     >
   </fluent-select>
 </template>
 <script setup lang="ts">
 import { computed, inject, nextTick, ref, watch } from 'vue'
 import { fieldLabelKey, formBusyKey } from '@/composables/useField'
+import ModelIcon from '@/components/ModelIcon.vue'
 defineOptions({ inheritAttrs: false })
 export interface UiSelectOption {
   label: string
   value: string
   disabled?: boolean
+  model?: string
+  icon?: string
+  upstreamModels?: string[]
 }
 const props = withDefaults(
   defineProps<{

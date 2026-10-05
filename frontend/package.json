@@ -12,6 +12,7 @@
   },
   "dependencies": {
     "@fluentui/web-components": "2.6.1",
+    "@lobehub/icons-static-svg": "1.95.1",
     "@vueuse/core": "^11.1.0",
     "apexcharts": "^5.13.0",
     "axios": "^1.7.7",

@@ -2,7 +2,7 @@ import json
 import time
 import uuid
 from datetime import datetime, timedelta
-from typing import Any, Optional
+from typing import Any, Literal, Optional
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, BackgroundTasks
@@ -130,9 +130,15 @@ def _validate_model_thinking_fields(data: BaseModel) -> None:
     if mode is not None and mode not in CLAUDE_THINKING_MODES:
         raise HTTPException(status_code=400, detail="claude_thinking_mode must be one of adaptive, enabled, disabled")
 
+ModelIconName = Literal[
+    "auto", "generic", "openai", "claude", "gemini", "deepseek", "qwen", "kimi",
+    "minimax", "zhipu", "grok", "meta", "mistral", "doubao", "azure", "google",
+]
+
 class ModelCreate(BaseModel):
     name: str
     display_name: str = ""
+    icon: ModelIconName = "auto"
     routing_strategy: str = "default"
     custom_js: str = ""
     failover_enabled: bool = True
@@ -143,6 +149,7 @@ class ModelCreate(BaseModel):
 
 class ModelUpdate(BaseModel):
     display_name: Optional[str] = None
+    icon: ModelIconName = "auto"
     routing_strategy: Optional[str] = None
     custom_js: Optional[str] = None
     failover_enabled: Optional[bool] = None
@@ -751,6 +758,7 @@ async def list_models(db: AsyncSession = Depends(get_db)):
             "id": m.id,
             "name": m.name,
             "display_name": m.display_name,
+            "icon": m.icon,
             "routing_strategy": m.routing_strategy,
             "custom_js": m.custom_js,
             "failover_enabled": m.failover_enabled,
@@ -773,6 +781,7 @@ async def get_model(model_id: str, db: AsyncSession = Depends(get_db)):
         raise HTTPException(status_code=404, detail="Model not found")
     return success_response(detail_result={
         "id": m.id, "name": m.name, "display_name": m.display_name,
+        "icon": m.icon,
         "routing_strategy": m.routing_strategy,
         "custom_js": m.custom_js, "failover_enabled": m.failover_enabled,
         "is_listed": m.is_listed,
@@ -794,6 +803,7 @@ async def create_model(data: ModelCreate, db: AsyncSession = Depends(get_db)):
         id=str(uuid.uuid4()),
         name=data.name,
         display_name=data.display_name,
+        icon=data.icon,
         routing_strategy=data.routing_strategy,
         custom_js=data.custom_js,
         failover_enabled=data.failover_enabled,

@@ -13,6 +13,7 @@ class ModelConfig(Base):
     )
     name: Mapped[str] = mapped_column(String(128), nullable=False, unique=True, index=True)
     display_name: Mapped[str] = mapped_column(String(256), default="")
+    icon: Mapped[str] = mapped_column(String(32), nullable=False, default="auto", server_default="auto")
     api_type: Mapped[str] = mapped_column(
         String(16), nullable=False, default="openai"
     )

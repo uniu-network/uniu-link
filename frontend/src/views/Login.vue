@@ -9,6 +9,7 @@
           <p class="secondary-text">AI 网关管理后台</p>
         </div>
       </div>
+      <div class="login-intro"><h2>登录控制台</h2><p class="secondary-text">连接模型，管理每一次调用。</p></div>
       <form class="stack" @submit.prevent="handleLogin">
         <UiField label="Admin API Key"
           ><UiInput

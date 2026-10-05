@@ -102,6 +102,9 @@ class MigrationTests(unittest.TestCase):
                     "SELECT model_id, channel_id, upstream_model_id FROM model_channel_refs"
                 )).one(), ("model-1", "channel-1", "upstream-model"))
                 self.assertEqual(self.connection.scalar(sa.text(
+                    "SELECT icon FROM model_configs WHERE id = 'model-1'"
+                )), "auto")
+                self.assertEqual(self.connection.scalar(sa.text(
                     "SELECT module_path FROM plugins"
                 )), "existing.Plugin")
                 command.downgrade(self.config, "base")
@@ -113,10 +116,20 @@ class MigrationTests(unittest.TestCase):
         self.assertIn("enable_cache", {c["name"] for c in inspector.get_columns("model_configs")})
         self.assertNotIn("health_check_mode", {c["name"] for c in inspector.get_columns("channels")})
         self.assertNotIn("from_apikey", {c["name"] for c in inspector.get_columns("request_logs")})
+        self.assertNotIn("icon", {c["name"] for c in inspector.get_columns("model_configs")})
         command.downgrade(self.config, "base")
         self.assertEqual(sa.inspect(self.connection).get_table_names(), ["alembic_version"])
         command.upgrade(self.config, "head")
         self.assert_schema_matches_models()
+
+    def test_manual_model_icon_survives_repeated_upgrade(self):
+        command.upgrade(self.config, "head")
+        self.insert_fixture("model_configs", id="custom-icon", name="alias", icon="qwen")
+        self.connection.commit()
+        command.upgrade(self.config, "head")
+        self.assertEqual(self.connection.scalar(sa.text(
+            "SELECT icon FROM model_configs WHERE id = 'custom-icon'"
+        )), "qwen")
 
     def test_application_migration_entrypoint_is_independent_of_cwd(self):
         # The container and local checkout place alembic.ini in different roots.

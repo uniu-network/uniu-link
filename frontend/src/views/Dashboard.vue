@@ -79,12 +79,13 @@
           <UiCard title="渠道健康状态">
             <template v-if="stats.channel_health?.length"
               ><div v-for="ch in stats.channel_health" :key="ch.id" class="channel-health-row">
-                <div class="min-w-0">
-                  <p class="truncate text-sm">{{ ch.name }}</p>
-                  <p class="secondary-text">{{ ch.provider }}</p>
+                <div class="channel-health-identity">
+                  <ModelIcon :provider="ch.provider" :size="22" />
+                  <div class="min-w-0"><p class="truncate text-sm">{{ ch.name }}</p>
+                  <p class="secondary-text">{{ ch.provider }}</p></div>
                 </div>
-                <UiBadge :variant="ch.health_status === 'healthy' ? 'success' : 'danger'">{{
-                  ch.health_status === 'healthy' ? '健康' : '异常'
+                <UiBadge :variant="ch.health_status === 'healthy' ? 'success' : ch.health_status === 'unhealthy' ? 'danger' : 'default'">{{
+                  ch.health_status === 'healthy' ? '健康' : ch.health_status === 'unhealthy' ? '异常' : '未知'
                 }}</UiBadge>
               </div></template
             >
@@ -132,6 +133,8 @@ import { useTheme } from '@/composables/useTheme'
 import PageHeader from '@/components/PageHeader.vue'
 import ListState from '@/components/ListState.vue'
 import NavIcon from '@/components/NavIcon.vue'
+import ModelIcon from '@/components/ModelIcon.vue'
+import { useMediaQuery } from '@vueuse/core'
 import UiDataTable from '@/components/ui/UiDataTable.vue'
 import UiButton from '@/components/ui/UiButton.vue'
 import UiBadge from '@/components/ui/UiBadge.vue'
@@ -146,11 +149,11 @@ const StatCard = defineComponent({
   props: { label: String, value: String, hint: String, tone: String, icon: String },
   setup(props) {
     return () =>
-      h(UiCard, null, {
+      h(UiCard, { class: 'reveal-item' }, {
         default: () => [
           h('div', { class: 'stat-top' }, [
             h('p', { class: 'secondary-text' }, props.label),
-            h(iconMap[props.icon || ''] || 'span', {
+            h('span', { class: 'stat-icon' }, [h(iconMap[props.icon || ''] || 'span', {
               size: 20,
               strokeWidth: 1.5,
               'aria-hidden': true,
@@ -160,7 +163,7 @@ const StatCard = defineComponent({
                   : props.tone === 'success'
                     ? 'message-symbol-success'
                     : 'secondary-text',
-            }),
+            })]),
           ]),
           h('p', { class: 'stat-value' }, props.value),
           props.hint ? h('p', { class: 'secondary-text' }, props.hint) : null,
@@ -189,6 +192,7 @@ const loading = ref(true)
 const loadError = ref('')
 const chartGranularity = ref<'hourly' | 'daily'>('hourly')
 const { isDark } = useTheme()
+const reducedMotion = useMediaQuery('(prefers-reduced-motion: reduce)')
 
 const granularityOptions = [
   { label: '按小时', value: 'hourly' },
@@ -240,7 +244,7 @@ function formatDay(value: string) {
 
 const baseChartOptions = computed<ApexOptions>(() => ({
   chart: {
-    animations: { enabled: false },
+    animations: { enabled: !reducedMotion.value, speed: 280, animateGradually: { enabled: false }, dynamicAnimation: { enabled: false } },
     toolbar: { show: false },
     zoom: { enabled: false },
     fontFamily: "'Segoe UI', system-ui, sans-serif",
@@ -262,7 +266,7 @@ const baseChartOptions = computed<ApexOptions>(() => ({
   xaxis: {
     labels: {
       style: {
-        colors: isDark.value ? '#ababab' : '#8a8a8a',
+        colors: isDark.value ? '#ababab' : '#656b76',
         fontFamily: "'Segoe UI', system-ui, sans-serif",
       },
     },
@@ -272,7 +276,7 @@ const baseChartOptions = computed<ApexOptions>(() => ({
   yaxis: {
     labels: {
       style: {
-        colors: isDark.value ? '#ababab' : '#8a8a8a',
+        colors: isDark.value ? '#ababab' : '#656b76',
         fontFamily: "'Segoe UI', system-ui, sans-serif",
       },
       formatter: (value: number) => formatNumber(Math.round(value)),
@@ -326,7 +330,7 @@ const tokenChartOptions = computed<ApexOptions>(() => ({
   ...tokenChartBaseOptions.value,
   xaxis: {
     categories: chartCategories.value,
-    labels: { style: { colors: isDark.value ? '#ababab' : '#8a8a8a' } },
+    labels: { style: { colors: isDark.value ? '#ababab' : '#656b76' } },
   },
   fill: {
     type: 'solid',
@@ -340,7 +344,7 @@ const requestChartOptions = computed<ApexOptions>(() => ({
   plotOptions: { bar: { borderRadius: 4, columnWidth: '45%' } },
   xaxis: {
     categories: chartCategories.value,
-    labels: { style: { colors: isDark.value ? '#ababab' : '#8a8a8a' } },
+    labels: { style: { colors: isDark.value ? '#ababab' : '#656b76' } },
   },
 }))
 
@@ -349,7 +353,7 @@ const healthyChannelChartOptions = computed<ApexOptions>(() => ({
   colors: [isDark.value ? '#6ccb5f' : '#107c10'],
   xaxis: {
     categories: chartCategories.value,
-    labels: { style: { colors: isDark.value ? '#ababab' : '#8a8a8a' } },
+    labels: { style: { colors: isDark.value ? '#ababab' : '#656b76' } },
   },
   tooltip: {
     theme: isDark.value ? 'dark' : 'light',

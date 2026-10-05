@@ -8,45 +8,59 @@
     >
     <ListState :error="loadError" @retry="load" />
     <UiSpinner v-if="!loadError" :show="loading">
-      <div class="space-y-4">
-        <UiCard v-for="m in models" :key="m.id" :title="m.display_name || m.name">
-          <template #extra
-            ><div class="flex flex-wrap items-center gap-2">
-              <UiBadge variant="info">{{ m.routing_strategy }}</UiBadge
-              ><UiBadge :variant="m.failover_enabled ? 'success' : 'default'">{{
-                m.failover_enabled ? '容灾顺延' : '不顺延'
-              }}</UiBadge
-              ><UiBadge v-if="m.supports_thinking" variant="warning"
-                >思考 {{ m.default_thinking_effort || 'none' }}</UiBadge
-              ><UiDropdown
-                ><UiDropdownItem
-                  :icon="Pencil"
-                  :loading="editingId === m.id"
-                  :onClick="() => openEdit(m)"
-                  >{{ editingId === m.id ? '加载中' : '编辑' }}</UiDropdownItem
-                ><UiDropdownItem
-                  :icon="Trash2"
-                  variant="danger"
-                  :loading="deletingModelId === m.id"
-                  :onClick="() => deleteModelItem(m.id)"
-                  >{{ deletingModelId === m.id ? '删除中' : '删除' }}</UiDropdownItem
-                ></UiDropdown
-              >
-            </div></template
-          >
-          <p class="text-sm text-muted-foreground">
-            路由目标（{{ m.channel_refs?.length || 0 }}个）
-          </p>
-          <div v-if="m.channel_refs?.length" class="mt-3 flex flex-wrap gap-2">
-            <UiBadge v-for="ref in m.channel_refs" :key="ref.id"
-              >{{ ref.channel_name || ref.inline_config?.name || 'inline' }} ·
-              {{ ref.type === 'inline' ? '直连上游' : '渠道' }}(权重{{ ref.weight }})</UiBadge
-            >
-          </div>
-          <p v-else class="mt-2 text-sm text-muted-foreground">无路由目标</p>
-        </UiCard>
-        <UiEmpty v-if="!models.length" title="暂无模型数据" />
+      <div class="catalog-overview" aria-label="模型概览">
+        <span><strong>{{ models.length }}</strong> 个模型</span>
+        <span><strong>{{ models.filter(m => m.is_listed).length }}</strong> 个公开</span>
+        <span><strong>{{ models.filter(m => m.supports_thinking).length }}</strong> 个支持思考</span>
       </div>
+      <div class="list-toolbar" role="search" aria-label="筛选模型">
+        <UiInput v-model="search" type="search" placeholder="搜索模型名称、显示名称或上游模型" aria-label="搜索模型" class="search-input" />
+        <UiSelect v-model="brandFilter" :options="brandOptions" aria-label="模型品牌" />
+        <span class="secondary-text" role="status">显示 {{ filteredModels.length }} / {{ models.length }} 个</span>
+        <UiButton v-if="search || brandFilter" variant="link" @click="search = ''; brandFilter = ''">清除筛选</UiButton>
+      </div>
+      <div v-if="filteredModels.length" class="model-grid">
+        <UiCard v-for="(m, index) in filteredModels" :key="m.id" class="model-card reveal-item" :style="{ '--reveal-index': Math.min(index, 7) }">
+          <template #header>
+            <ModelIcon :model="m.name" :icon="m.icon" :upstream-models="upstreamModelNames(m)" :size="28" framed />
+            <div class="model-card-title">
+              <h2>{{ m.display_name || m.name }}</h2>
+              <code class="secondary-text">{{ m.name }}</code>
+            </div>
+          </template>
+          <template #extra>
+            <UiDropdown>
+              <UiDropdownItem :icon="Pencil" :loading="editingId === m.id" :onClick="() => openEdit(m)">{{ editingId === m.id ? '加载中' : '编辑' }}</UiDropdownItem>
+              <UiDropdownItem :icon="Trash2" variant="danger" :loading="deletingModelId === m.id" :onClick="() => deleteModelItem(m.id)">{{ deletingModelId === m.id ? '删除中' : '删除' }}</UiDropdownItem>
+            </UiDropdown>
+          </template>
+          <div class="model-capabilities">
+            <UiBadge>{{ routingStrategyOptions.find(option => option.value === m.routing_strategy)?.label || m.routing_strategy }}</UiBadge>
+            <UiBadge :variant="m.is_listed ? 'info' : 'default'">{{ m.is_listed ? '公开模型' : '未公开' }}</UiBadge>
+            <UiBadge v-if="m.supports_thinking" variant="info">思考 · {{ m.default_thinking_effort || 'none' }}</UiBadge>
+          </div>
+          <div class="model-routes">
+            <div class="summary-row"><span class="secondary-text">路由目标</span><strong>{{ m.channel_refs?.length || 0 }}</strong></div>
+            <div v-if="m.channel_refs?.length" class="route-targets">
+              <div v-for="target in m.channel_refs" :key="target.id" class="route-target">
+                <NavIcon name="server" :size="16" />
+                <span class="route-target-copy"><span>{{ target.channel_name || target.inline_config?.name || '直连上游' }}</span><code class="secondary-text">{{ target.upstream_model_id || '未设置上游模型' }}</code></span>
+                <span class="secondary-text">权重 {{ target.weight }}</span>
+              </div>
+            </div>
+            <p v-else class="model-no-routes"><NavIcon name="warning" :size="16" />尚未配置路由目标</p>
+          </div>
+          <template #footer>
+            <span class="secondary-text">{{ m.failover_enabled ? '已启用自动容灾' : '未启用自动容灾' }}</span>
+            <UiButton variant="link" :loading="editingId === m.id" @click="openEdit(m)">配置模型</UiButton>
+          </template>
+        </UiCard>
+      </div>
+      <UiEmpty v-else :title="models.length ? '没有匹配的模型' : '暂无模型数据'" :description="models.length ? '尝试其他关键词，或清除筛选条件。' : '添加对外模型并配置路由目标，即可通过网关调用。'">
+        <template #icon><NavIcon name="model" :size="32" /></template>
+        <UiButton v-if="models.length" @click="search = ''; brandFilter = ''">清除筛选</UiButton>
+        <UiButton v-else variant="primary" @click="openCreate">新建模型</UiButton>
+      </UiEmpty>
     </UiSpinner>
 
     <UiDrawer
@@ -64,6 +78,13 @@
           ><UiField label="显示名称"
             ><UiInput v-model="form.display_name" placeholder="请输入显示名称" class="w-full"
           /></UiField>
+        </div>
+        <div class="model-icon-editor">
+          <ModelIcon :model="form.name" :icon="form.icon" :upstream-models="upstreamModelNames({ name: form.name, channel_refs: modelRefs })" :size="32" framed />
+          <UiField label="模型图标">
+            <UiSelect v-model="form.icon" :options="iconOptions" />
+            <p class="secondary-text">手动选择后优先使用此图标；自动识别会参考模型名称和路由目标。</p>
+          </UiField>
         </div>
         <UiField label="分配策略"
           ><UiSelect
@@ -229,6 +250,8 @@ import UiSpinner from '@/components/ui/UiSpinner.vue'
 import PageHeader from '@/components/PageHeader.vue'
 import ListState from '@/components/ListState.vue'
 import NavIcon from '@/components/NavIcon.vue'
+import ModelIcon from '@/components/ModelIcon.vue'
+import { modelIconOptions, resolveModelIdentity, upstreamModelNames } from '@/utils/modelIdentity'
 
 import UiField from '@/components/ui/UiField.vue'
 import UiInput from '@/components/ui/UiInput.vue'
@@ -272,10 +295,27 @@ const editingId = ref('')
 const deletingModelId = ref('')
 const removingTargetId = ref('')
 const targetError = ref('')
+const search = ref('')
+const brandFilter = ref('')
+const iconOptions = modelIconOptions.map(option => ({ ...option, icon: option.value }))
+const modelIdentity = (m: any) => resolveModelIdentity(m.name, upstreamModelNames(m), m.icon)
+const brandOptions = computed(() => [
+  { label: '全部品牌', value: '' },
+  ...Array.from(new Map(models.value.map(m => {
+    const identity = modelIdentity(m)
+    return [identity.id, { label: identity.label, value: identity.id }]
+  })).values()),
+])
+const filteredModels = computed(() => {
+  const query = search.value.trim().toLowerCase()
+  return models.value.filter(m => (!brandFilter.value || modelIdentity(m).id === brandFilter.value)
+    && (!query || [m.name, m.display_name, ...upstreamModelNames(m)].some(value => value?.toLowerCase().includes(query))))
+})
 const targetSubmitting = ref(false)
 const form = ref<any>({
   name: '',
   display_name: '',
+  icon: 'auto',
   routing_strategy: 'default',
   custom_js: '',
   failover_enabled: true,
@@ -369,6 +409,7 @@ function modelPayload() {
   return {
     name: form.value.name,
     display_name: form.value.display_name,
+    icon: form.value.icon,
     routing_strategy: form.value.routing_strategy,
     custom_js: form.value.custom_js,
     failover_enabled: form.value.failover_enabled,
@@ -396,6 +437,7 @@ function openCreate() {
   form.value = {
     name: '',
     display_name: '',
+    icon: 'auto',
     routing_strategy: 'default',
     custom_js: '',
     failover_enabled: true,
@@ -411,7 +453,7 @@ function openCreate() {
 }
 async function openEdit(m: any) {
   isEditing.value = true
-  form.value = { ...m }
+  form.value = { ...m, icon: m.icon || 'auto' }
   targetForm.value = newTargetForm()
   targetError.value = ''
   try {

@@ -93,6 +93,9 @@
 import PageHeader from '@/components/PageHeader.vue'
 import ListState from '@/components/ListState.vue'
 import NavIcon from '@/components/NavIcon.vue'
+import ModelLabel from '@/components/ModelLabel.vue'
+import { listModels } from '@/api/models'
+import { upstreamModelNames, type ModelPresentation } from '@/utils/modelIdentity'
 
 import UiInput from '@/components/ui/UiInput.vue'
 import UiField from '@/components/ui/UiField.vue'
@@ -149,6 +152,7 @@ const CodePanel = defineComponent({
 })
 
 const logs = ref<any[]>([])
+const modelCatalog = ref<ModelPresentation[]>([])
 const loading = ref(true)
 const loadError = ref('')
 const pagingDirection = ref<'previous' | 'next' | ''>('')
@@ -257,47 +261,28 @@ function renderApiKey(row: any) {
 }
 
 const columns = [
-  {
-    title: 'Trace ID',
-    key: 'trace_id',
-    render: (row: any) =>
-      h('code', { class: 'text-xs text-muted-foreground' }, row.trace_id.slice(0, 8) + '...'),
-  },
-  {
-    title: 'API类型',
-    key: 'api_type',
-    render: (row: any) =>
-      h(
-        UiBadge,
-        { variant: row.api_type === 'openai' ? 'success' : 'info' },
-        { default: () => row.api_type }
-      ),
-  },
-  { title: '调用密钥', key: 'from_apikey_name', render: renderApiKey },
-  { title: '模型', key: 'model' },
-  { title: '思考', key: 'thinking_effort' },
-  { title: '渠道', key: 'selected_channel_name' },
-  { title: '耗时(ms)', key: 'latency_ms' },
-  { title: '请求Token', key: 'prompt_tokens' },
-  { title: '响应Token', key: 'completion_tokens' },
-  { title: '总Token', key: 'total_tokens' },
-  {
-    title: '状态码',
-    key: 'status_code',
-    render: (row: any) =>
-      h(
-        'span',
-        { class: row.status_code >= 400 ? 'message-symbol-error' : 'message-symbol-success' },
-        String(row.status_code)
-      ),
-  },
-  { title: '时间', key: 'created_at' },
-  {
-    title: '错误',
-    key: 'error_message',
-    render: (row: any) =>
-      h('span', { class: 'text-xs message-symbol-error' }, row.error_message || '-'),
-  },
+  { title: '请求 / 时间', key: 'trace_id', width: 155, render: (row: any) => h('div', { class: 'table-cell-stack' }, [
+    h('code', { title: row.trace_id }, shortId(row.trace_id)),
+    h('span', { class: 'secondary-text' }, formatDate(row.created_at)),
+  ]) },
+  { title: '模型 / 协议', key: 'model', width: 180, render: (row: any) => {
+    const model = modelCatalog.value.find(item => item.name === row.model)
+    return h('div', { class: 'table-cell-stack' }, [
+      h(ModelLabel, { model: row.model, icon: model?.icon, upstreamModels: upstreamModelNames(model) }),
+      h('span', { class: 'secondary-text' }, `${row.api_type}${row.thinking_effort ? ` · 思考 ${row.thinking_effort}` : ''}`),
+    ])
+  } },
+  { title: '调用密钥', key: 'from_apikey_name', width: 130, render: renderApiKey },
+  { title: '渠道', key: 'selected_channel_name', width: 120 },
+  { title: '状态', key: 'status_code', width: 100, render: (row: any) => h('div', { class: 'table-cell-stack' }, [
+    h(UiBadge, { variant: row.status_code >= 400 ? 'danger' : 'success' }, { default: () => String(row.status_code) }),
+    row.error_message ? h('span', { class: 'table-error secondary-text', title: row.error_message }, row.error_message) : null,
+  ]) },
+  { title: '耗时', key: 'latency_ms', width: 90, render: (row: any) => `${Math.round(row.latency_ms || 0)} ms` },
+  { title: 'Token 用量', key: 'total_tokens', width: 150, render: (row: any) => h('div', { class: 'table-cell-stack' }, [
+    h('strong', String(row.total_tokens ?? 0)),
+    h('span', { class: 'secondary-text' }, `输入 ${row.prompt_tokens ?? 0} / 输出 ${row.completion_tokens ?? 0}`),
+  ]) },
   {
     title: '操作',
     key: 'actions',
@@ -349,5 +334,9 @@ watch(pageSize, () => {
   load()
 })
 
-onMounted(load)
+onMounted(() => {
+  void load()
+  // Branding is optional; log browsing remains available if the catalog fails.
+  void listModels().then(result => { modelCatalog.value = result.data || [] }).catch(() => {})
+})
 </script>
