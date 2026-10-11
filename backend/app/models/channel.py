@@ -1,6 +1,6 @@
 import uuid
 from datetime import datetime
-from sqlalchemy import String, Integer, Float, Boolean, DateTime, Text, JSON, func
+from sqlalchemy import String, Integer, Float, Boolean, DateTime, Text, JSON, ForeignKey, func
 from sqlalchemy.orm import Mapped, mapped_column
 from app.core.database import Base
 
@@ -34,6 +34,12 @@ class Channel(Base):
     health_check_max_tokens: Mapped[int] = mapped_column(Integer, default=32)
     health_status: Mapped[str] = mapped_column(String(16), default="unknown")
     circuit_state: Mapped[str] = mapped_column(String(16), default="closed")
+    cpa_instance_id: Mapped[str | None] = mapped_column(
+        String(36), ForeignKey("cpa_instances.id", ondelete="SET NULL"), nullable=True
+    )
+    # 托管的 CLIProxyAPI 渠道按账号类型拆分，这里记录该渠道对应的账号类型（provider）。
+    cpa_provider: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    auto_managed: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
     )

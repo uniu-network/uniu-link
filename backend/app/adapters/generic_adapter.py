@@ -70,6 +70,9 @@ def get_adapter(provider: str):
         "azure": AzureAdapter(),
         "google": GenericAdapter(),
         "custom": GenericAdapter(),
+        # CLIProxyAPI 原生提供 OpenAI / Responses / Claude 三种协议入口，
+        # 因此直接复用通用适配器，只负责拼接对应的上游路径。
+        "cliproxyapi": GenericAdapter(),
     }
 
     return adapters.get(provider, GenericAdapter())

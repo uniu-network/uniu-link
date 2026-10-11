@@ -21,6 +21,12 @@ const routes = [
     meta: { requiresAuth: true, title: '渠道管理' },
   },
   {
+    path: '/accounts',
+    name: 'Accounts',
+    component: () => import('@/views/Accounts.vue'),
+    meta: { requiresAuth: true, title: '账号管理' },
+  },
+  {
     path: '/models',
     name: 'Models',
     component: () => import('@/views/Models.vue'),

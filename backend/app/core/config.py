@@ -44,6 +44,12 @@ CONFIG_META: dict[str, tuple[type, Any, bool, str]] = {
     "raw_json_log": (bool, False, True, "原始 JSON 日志"),
     "log_body": (bool, False, True, "记录请求体"),
     "log_content": (bool, False, True, "记录响应内容"),
+    "cpa_manage_enabled": (bool, False, True, "允许托管 CLIProxyAPI 二进制"),
+    "cpa_install_dir": (str, "", True, "CLIProxyAPI 安装目录，留空则使用 backend/.uniulink"),
+    "cpa_release_repo": (str, "router-for-me/CLIProxyAPI", True, "CLIProxyAPI 发布仓库"),
+    "cpa_download_base_url": (str, "https://github.com", True, "CLIProxyAPI 下载源"),
+    "cpa_start_timeout": (int, 20, True, "CLIProxyAPI 启动超时(秒)"),
+    "cpa_quota_plugin_enabled": (bool, True, True, "默认安装 CLIProxyAPI 配额插件并展示账号额度"),
 }
 
 YAML_SECTION_MAP: dict[str, list[str]] = {
@@ -56,6 +62,8 @@ YAML_SECTION_MAP: dict[str, list[str]] = {
                         "circuit_breaker_half_open_max_requests"],
     "rate_limit": ["rate_limit_global_rps", "rate_limit_per_key_rps", "rate_limit_per_model_rps"],
     "logging": ["log_level", "log_file", "raw_json_log", "log_body", "log_content"],
+    "cpa": ["cpa_manage_enabled", "cpa_install_dir", "cpa_release_repo",
+            "cpa_download_base_url", "cpa_start_timeout", "cpa_quota_plugin_enabled"],
 }
 
 YAML_KEY_ALIASES: dict[str, dict[str, str]] = {
@@ -86,6 +94,14 @@ YAML_KEY_ALIASES: dict[str, dict[str, str]] = {
     "logging": {
         "level": "log_level",
         "file": "log_file",
+    },
+    "cpa": {
+        "manage_enabled": "cpa_manage_enabled",
+        "install_dir": "cpa_install_dir",
+        "release_repo": "cpa_release_repo",
+        "download_base_url": "cpa_download_base_url",
+        "start_timeout": "cpa_start_timeout",
+        "quota_plugin_enabled": "cpa_quota_plugin_enabled",
     },
 }
 
@@ -118,6 +134,12 @@ class Settings(BaseModel):
     raw_json_log: bool = False
     log_body: bool = False
     log_content: bool = False
+    cpa_manage_enabled: bool = False
+    cpa_install_dir: str = ""
+    cpa_release_repo: str = "router-for-me/CLIProxyAPI"
+    cpa_download_base_url: str = "https://github.com"
+    cpa_start_timeout: int = 20
+    cpa_quota_plugin_enabled: bool = True
 
     @property
     def database_url(self) -> str:

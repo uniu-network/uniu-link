@@ -56,6 +56,14 @@ async def lifespan(app: FastAPI):
     import asyncio
     health_task = asyncio.create_task(health_check_loop())
 
+    # 对齐受管 CLIProxyAPI 实例：接管已运行进程，并按 auto_start 拉起实例。
+    from app.services.cpa_manager import reconcile_instances, shutdown_reapers
+
+    try:
+        await reconcile_instances()
+    except Exception as exc:
+        logger.error(f"CLIProxyAPI instance reconcile error: {exc}")
+
     yield
 
     logger.info("Shutting down UniuLink AI Gateway...")
@@ -64,6 +72,7 @@ async def lifespan(app: FastAPI):
         await health_task
     except asyncio.CancelledError:
         pass
+    await shutdown_reapers()
     await stop_frontend_dev_server()
     await close_redis()
 

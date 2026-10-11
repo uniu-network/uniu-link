@@ -50,7 +50,7 @@ class MigrationTests(unittest.TestCase):
         # env.py imports all model classes. Compare columns, types, nullability,
         # indexes and foreign keys, not just whether the tables were created.
         self.assertEqual(compare_metadata(context, database.Base.metadata), [])
-        self.assertEqual(len(database.Base.metadata.tables), 6)
+        self.assertEqual(len(database.Base.metadata.tables), 7)
 
     def insert_fixture(self, table_name, **overrides):
         table = sa.Table(table_name, sa.MetaData(), autoload_with=self.connection)

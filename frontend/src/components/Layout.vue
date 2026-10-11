@@ -99,6 +99,7 @@ const menuGroups = [
   ] },
   { label: '网关管理', items: [
     { path: '/channels', label: '渠道管理', icon: 'server' },
+    { path: '/accounts', label: '账号管理', icon: 'key' },
     { path: '/models', label: '模型管理', icon: 'model' },
     { path: '/api-keys', label: 'API 密钥', icon: 'key' },
   ] },

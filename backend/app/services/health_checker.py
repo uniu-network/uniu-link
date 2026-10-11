@@ -72,6 +72,9 @@ async def _run_prompt_probe(
 
 async def check_channel_health(channel: Channel) -> bool:
     try:
+        if channel.health_check_mode == "account_pool":
+            return await check_account_pool_health(channel)
+
         api_key = key_encryption.decrypt(channel.encrypted_api_key)
         adapter = get_adapter(channel.provider)
         headers = adapter.get_headers(api_key) if api_key else {}
@@ -128,6 +131,82 @@ async def check_channel_health(channel: Channel) -> bool:
             },
         )
         return False
+
+
+async def check_account_pool_health(channel: Channel) -> bool:
+    """按账号池判定托管 CLIProxyAPI 渠道的健康状态。
+
+    托管渠道按账号类型拆分，因此只统计该渠道对应类型的账号：实例进程存活且
+    该类型下至少有一个账号可被调度，才算健康。进程未运行、该类型下没有账号、
+    或账号都处于禁用/冷却/失效状态时判为不健康。
+    """
+    from sqlalchemy import select
+
+    from app.core.database import AsyncSessionLocal
+    from app.models.cpa_instance import CpaInstance
+    from app.services import cpa_accounts, cpa_manager
+
+    if not channel.cpa_instance_id:
+        logger.warning(
+            "Account pool health check requires a bound CLIProxyAPI instance",
+            extra={"channel": channel.name, "trace_id": "health_check"},
+        )
+        return False
+
+    async with AsyncSessionLocal() as session:
+        result = await session.execute(
+            select(CpaInstance).where(CpaInstance.id == channel.cpa_instance_id)
+        )
+        instance = result.scalar_one_or_none()
+
+    if instance is None:
+        logger.warning(
+            "CLIProxyAPI instance not found for channel",
+            extra={"channel": channel.name, "trace_id": "health_check"},
+        )
+        return False
+
+    if not await cpa_manager.is_instance_running(instance):
+        logger.info(
+            "CLIProxyAPI instance is not running",
+            extra={"channel": channel.name, "instance": instance.name, "trace_id": "health_check"},
+        )
+        return False
+
+    try:
+        files = await cpa_accounts.list_auth_files(instance)
+    except cpa_accounts.CpaManagementError as exc:
+        logger.warning(
+            "Failed to read CLIProxyAPI account pool",
+            extra={"channel": channel.name, "instance": instance.name, "error": str(exc), "trace_id": "health_check"},
+        )
+        return False
+
+    provider = (channel.cpa_provider or "").strip().lower()
+    if provider:
+        # 只统计该渠道对应账号类型的账号，避免其它类型掩盖本类型的不可用。
+        entries = [
+            entry
+            for entry in files
+            if isinstance(entry, dict) and cpa_accounts.account_provider(entry) == provider
+        ]
+    else:
+        entries = [entry for entry in files if isinstance(entry, dict)]
+
+    summary = cpa_accounts.summarize_accounts(entries)
+    logger.info(
+        "Account pool health check result",
+        extra={
+            "channel": channel.name,
+            "instance": instance.name,
+            "provider": provider or "(全部)",
+            "accounts": summary["total"],
+            "available": summary["available"],
+            "healthy": summary["healthy"],
+            "trace_id": "health_check",
+        },
+    )
+    return bool(summary["healthy"])
 
 
 async def run_health_checks():

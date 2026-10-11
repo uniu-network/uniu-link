@@ -52,6 +52,10 @@ postgres_data/
 redis_data/
 docker-data/
 
+# CLIProxyAPI 托管实例：二进制、实例配置与凭据
+.uniulink/
+data/cpa/
+
 # Generated assets
 generated-images/
 .opencode/generated-images/

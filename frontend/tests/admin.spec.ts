@@ -50,6 +50,128 @@ const key = {
   allowed_models: [],
   rate_limit: 0,
 }
+const cpaInstance = {
+  id: 'cpa-1',
+  name: 'primary',
+  host: '127.0.0.1',
+  port: 8317,
+  base_url: 'http://127.0.0.1:8317',
+  version: '8.0.22',
+  binary_path: '/data/cpa/bin/8.0.22/CLIProxyAPI',
+  managed_binary: true,
+  install_dir: '/data/cpa/instances/cpa-1',
+  auth_dir: '/data/cpa/instances/cpa-1/auth',
+  log_path: '/data/cpa/instances/cpa-1/cpa.log',
+  auto_start: true,
+  status: 'running',
+  pid: 4242,
+  access_key: 'cpa-access-key',
+  last_error: '',
+  last_started_at: '2026-10-12T10:00:00Z',
+  channels: [
+    {
+      id: 'ch-cpa-codex',
+      name: 'CliProxyAPI-OpenAI Codex',
+      cpa_provider: 'codex',
+      health_status: 'healthy',
+      upstream_models: ['gpt-5', 'gpt-5-codex'],
+    },
+  ],
+}
+const cpaAccounts = [
+  {
+    id: 'acc-1',
+    auth_index: '0',
+    name: 'codex-a.json',
+    provider: 'codex',
+    provider_label: 'OpenAI Codex',
+    label: 'codex-a',
+    email: 'codex@example.com',
+    account: '',
+    account_type: 'plus',
+    project_id: '',
+    note: '',
+    priority: 1,
+    weight: 1,
+    status: 'active',
+    status_message: '',
+    state: 'active',
+    available: true,
+    disabled: false,
+    unavailable: false,
+    runtime_only: false,
+    success: 18,
+    failed: 2,
+    recent_requests: [
+      { time: '2026-10-12T11:50:00Z', success: 4, failed: 0 },
+      { time: '2026-10-12T11:40:00Z', success: 3, failed: 1 },
+    ],
+    cooldowns: [],
+    next_retry_after: '',
+    last_refresh: '2026-10-12T11:00:00Z',
+    updated_at: '2026-10-12T11:00:00Z',
+    created_at: '2026-10-12T09:00:00Z',
+    size: 2048,
+    supports_quota: false,
+  },
+  {
+    id: 'acc-2',
+    auth_index: '1',
+    name: 'claude-b.json',
+    provider: 'claude',
+    provider_label: 'Claude Code',
+    label: 'claude-b',
+    email: 'claude@example.com',
+    account: '',
+    account_type: 'pro',
+    project_id: '',
+    note: '备用',
+    priority: 2,
+    weight: 1,
+    status: 'error',
+    status_message: 'unauthorized: token expired',
+    state: 'cooling',
+    available: false,
+    disabled: false,
+    unavailable: true,
+    runtime_only: false,
+    success: 3,
+    failed: 9,
+    recent_requests: [{ time: '2026-10-12T11:50:00Z', success: 0, failed: 5 }],
+    cooldowns: [{ scope: 'auth', reason: 'unauthorized', remaining_seconds: 240 }],
+    next_retry_after: '2099-10-12T12:04:00Z',
+    last_refresh: '2026-10-12T10:00:00Z',
+    updated_at: '2026-10-12T11:56:00Z',
+    created_at: '2026-10-12T09:10:00Z',
+    size: 1024,
+    supports_quota: false,
+  },
+]
+const cpaSummary = {
+  total: 2,
+  active: 1,
+  available: 1,
+  degraded: 0,
+  cooling: 1,
+  error: 0,
+  disabled: 0,
+  pending: 0,
+  refreshing: 0,
+  healthy: true,
+}
+const managedChannel = {
+  ...channel,
+  id: 'ch-cpa',
+  name: 'CliProxyAPI-OpenAI Codex',
+  provider: 'cliproxyapi',
+  base_url: 'http://127.0.0.1:8317',
+  api_type: 'openai',
+  auto_managed: true,
+  cpa_instance_id: 'cpa-1',
+  cpa_provider: 'codex',
+  health_check_mode: 'account_pool',
+  upstream_models: ['gpt-5', 'gpt-5-codex'],
+}
 const log = {
   id: 'l-1',
   trace_id: 'trace-123456789',
@@ -78,6 +200,10 @@ async function fixtures(page: Page, authenticated = true) {
     const path = new URL(route.request().url()).pathname
     let data: unknown = { data: [] }
     if (path === '/api/admin/channels') data = { data: [channel] }
+    if (path === '/api/admin/cpa/status') data = { channel_prefix: 'CliProxyAPI-', manage_enabled: true }
+    if (path === '/api/admin/cpa/instance') data = cpaInstance
+    if (path === '/api/admin/cpa/accounts')
+      data = { data: cpaAccounts, summary: cpaSummary, by_provider: [] }
     if (path === '/api/admin/models') data = { data: [model] }
     if (path === '/api/admin/plugins') data = { data: [plugin] }
     if (path === '/api/admin/api-keys') data = { data: [key] }
@@ -154,11 +280,12 @@ async function more(page: Page, index = 0) {
   await button(page, '更多操作').nth(index).click()
 }
 
-test('all eight views render official controls with no runtime errors', async ({ page }) => {
+test('all nine views render official controls with no runtime errors', async ({ page }) => {
   const errors = await fixtures(page)
   const routes = [
     ['/', '仪表盘'],
     ['/channels', '渠道管理'],
+    ['/accounts', '账号管理'],
     ['/models', '模型管理'],
     ['/logs', '请求日志'],
     ['/api-keys', 'API 密钥'],
@@ -531,8 +658,7 @@ test('config number and boolean controls preserve typed values', async ({ page }
   const numericRow = page
     .locator('fluent-data-grid-row')
     .filter({ hasText: 'default_channel_timeout' })
-  await numericRow.getByRole('button', { name: '更多操作' }).click()
-  await page.getByRole('menuitem', { name: '编辑', exact: true }).click()
+  await numericRow.getByRole('button', { name: '编辑', exact: true }).click()
   await page.getByRole('spinbutton', { name: '值', exact: true }).fill('40')
   const number = page.waitForRequest(
     (r) => r.url().endsWith('/config/default_channel_timeout') && r.method() === 'PUT'
@@ -541,8 +667,7 @@ test('config number and boolean controls preserve typed values', async ({ page }
   expect((await number).postDataJSON()).toEqual({ value: 40 })
   await expect(page.getByRole('dialog')).toHaveCount(0)
   const boolRow = page.locator('fluent-data-grid-row').filter({ hasText: 'log_body' })
-  await boolRow.getByRole('button', { name: '更多操作' }).click()
-  await page.getByRole('menuitem', { name: '编辑', exact: true }).click()
+  await boolRow.getByRole('button', { name: '编辑', exact: true }).click()
   await page.getByRole('checkbox', { name: '启用', exact: true }).click()
   await expect(page.getByRole('checkbox', { name: '启用', exact: true })).toBeChecked()
   const bool = page.waitForRequest(
@@ -807,5 +932,82 @@ test('channel search and health filters work together and clear without changing
   await expect(page.getByText('暂无数据', { exact: true })).toBeVisible()
   await button(page, '清除筛选').click()
   await expect(page.locator('fluent-data-grid-row:not([row-type="header"])')).toHaveCount(2)
+  expect(errors).toEqual([])
+})
+
+test('managed CLIProxyAPI channel is read-only in the channel list', async ({ page }) => {
+  const errors = await fixtures(page)
+  await page.route('**/api/admin/channels', route =>
+    route.fulfill({ json: { data: [channel, managedChannel] } })
+  )
+  await page.goto('/channels')
+  const managedRow = page.locator('fluent-data-grid-row', { hasText: 'CliProxyAPI-primary' })
+  await expect(managedRow).toContainText('托管')
+  await expect(managedRow).toContainText('账号池探测')
+  await expect(managedRow).toContainText('由托管实例自动维护')
+  // 托管渠道不提供编辑/删除，只跳转到账号管理。
+  await expect(managedRow.getByRole('button', { name: '更多操作' })).toHaveCount(0)
+  await managedRow.getByRole('button', { name: '账号管理' }).click()
+  await expect(page).toHaveURL(/\/accounts$/)
+  expect(errors).toEqual([])
+})
+
+test('accounts page reports pool health and account states', async ({ page }) => {
+  const errors = await fixtures(page)
+  await page.goto('/accounts')
+  await expect(page.getByText('渠道状态健康', { exact: true })).toBeVisible()
+  await expect(page.getByText('账号池中仍有 1 个可用账号', { exact: false })).toBeVisible()
+  await expect(page.locator('.stat-value').first()).toHaveText('2')
+  const rows = page.locator('fluent-data-grid-row:not([row-type="header"])')
+  await expect(rows).toHaveCount(2)
+  await expect(page.locator('fluent-data-grid')).toContainText('OpenAI Codex')
+  await expect(page.locator('fluent-data-grid')).toContainText('冷却中')
+  await expect(page.locator('fluent-data-grid')).toContainText('unauthorized: token expired')
+  // 状态筛选只保留可用账号。
+  await select(page, '账号状态', '可用')
+  await expect(rows).toHaveCount(1)
+  await expect(page.locator('fluent-data-grid')).toContainText('codex@example.com')
+  expect(errors).toEqual([])
+})
+
+test('accounts page disables an account through the row menu', async ({ page }) => {
+  const errors = await fixtures(page)
+  let payload: any = null
+  await page.route('**/api/admin/cpa/accounts', async (route) => {
+    if (route.request().method() === 'PATCH') {
+      payload = route.request().postDataJSON()
+      await route.fulfill({ json: { message: 'ok' } })
+      return
+    }
+    await route.fulfill({ json: { data: cpaAccounts, summary: cpaSummary, by_provider: [] } })
+  })
+  await page.goto('/accounts')
+  await page.locator('fluent-data-grid-row', { hasText: 'codex@example.com' })
+    .getByRole('button', { name: '更多操作' })
+    .click()
+  await page.getByRole('menuitem', { name: '禁用账号' }).click()
+  await expect(page.getByText('账号已禁用', { exact: true })).toBeVisible()
+  expect(payload).toMatchObject({ name: 'codex-a.json', disabled: true })
+  expect(errors).toEqual([])
+})
+
+test('accounts page starts an OAuth session and reports success', async ({ page }) => {
+  const errors = await fixtures(page)
+  let started: any = null
+  await page.route('**/api/admin/cpa/oauth/start', async (route) => {
+    started = route.request().postDataJSON()
+    await route.fulfill({ json: { url: 'https://auth.example/authorize?state=abc', state: 'abc' } })
+  })
+  await page.route('**/api/admin/cpa/oauth/status**', route =>
+    route.fulfill({ json: { status: 'ok' } })
+  )
+  await page.goto('/accounts')
+  await button(page, '添加账号').click()
+  await expect(page.getByRole('combobox', { name: '添加方式' })).toBeVisible()
+  await expect(page.getByRole('combobox', { name: '账号类型' })).toBeVisible()
+  await button(page, '获取授权链接').click()
+  await expect(page.locator('.oauth-link')).toHaveAttribute('href', /auth\.example/)
+  await expect(page.getByText('账号已添加', { exact: true })).toBeVisible()
+  expect(started).toMatchObject({ provider: 'codex' })
   expect(errors).toEqual([])
 })

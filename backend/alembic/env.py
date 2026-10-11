@@ -11,6 +11,7 @@ from app.core.config import settings
 from app.core.database import Base
 from app.models.api_key import ApiKey
 from app.models.channel import Channel
+from app.models.cpa_instance import CpaInstance
 from app.models.model_channel_ref import ModelChannelRef
 from app.models.model_config import ModelConfig
 from app.models.plugin import Plugin

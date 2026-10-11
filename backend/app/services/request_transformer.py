@@ -220,7 +220,7 @@ def _apply_default_claude_thinking(
     request_body["output_config"] = output_config
 
 def _provider_supports_responses(provider: str) -> bool:
-    return provider in ("openai", "azure", "custom", "google")
+    return provider in ("openai", "azure", "custom", "google", "cliproxyapi")
 
 def transform_request_body(
     request_body: dict[str, Any],

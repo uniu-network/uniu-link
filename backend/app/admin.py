@@ -35,9 +35,12 @@ from app.core.response import success_response, error_response
 from app.adapters.generic_adapter import get_adapter
 from app.adapters.base_adapter import merge_custom_headers
 from app.services.request_transformer import normalize_channel_api_type
+from app.admin_cpa import cpa_admin_router
 
 logger = get_logger(__name__)
 admin_router = APIRouter()
+
+admin_router.include_router(cpa_admin_router, prefix="/cpa", tags=["CLIProxyAPI"])
 
 @admin_router.post("/auth/verify")
 async def verify_admin():
@@ -84,7 +87,7 @@ async def _record_test_health(channel_id: str, status: str) -> None:
 
 
 DEFAULT_HEALTH_CHECK_PROMPT = "Hi, please respond with a short greeting to confirm you are working."
-HEALTH_CHECK_MODES = {"model_list", "prompt"}
+HEALTH_CHECK_MODES = {"model_list", "prompt", "account_pool"}
 
 class ChannelCreate(BaseModel):
     name: str
@@ -198,7 +201,6 @@ def _validate_channel_api_type(api_type: Optional[str], provider: str) -> str:
         raise HTTPException(status_code=400, detail=f"{provider} channels cannot use claude api_type")
     return normalize_channel_api_type(api_type or _default_api_type_for_provider(provider), provider)
 
-
 def _validate_channel_health_check_config(
     mode: str,
     model: str,
@@ -206,7 +208,10 @@ def _validate_channel_health_check_config(
     max_tokens: int,
 ) -> None:
     if mode not in HEALTH_CHECK_MODES:
-        raise HTTPException(status_code=400, detail="health_check_mode must be model_list or prompt")
+        raise HTTPException(
+            status_code=400,
+            detail="health_check_mode must be model_list, prompt or account_pool",
+        )
     if max_tokens <= 0:
         raise HTTPException(status_code=400, detail="health_check_max_tokens must be greater than 0")
     if mode != "prompt":
@@ -479,6 +484,9 @@ async def list_channels(db: AsyncSession = Depends(get_db)):
             "circuit_state": circuit_info["circuit_state"],
             "fail_count": circuit_info["fail_count"],
             "half_open_count": circuit_info["half_open_count"],
+            "auto_managed": bool(ch.auto_managed),
+            "cpa_instance_id": ch.cpa_instance_id,
+            "cpa_provider": ch.cpa_provider or "",
             "created_at": ch.created_at.isoformat() if ch.created_at else "",
             "updated_at": ch.updated_at.isoformat() if ch.updated_at else "",
         })
@@ -507,12 +515,21 @@ async def get_channel(channel_id: str, db: AsyncSession = Depends(get_db)):
         "circuit_state": circuit_info["circuit_state"],
         "fail_count": circuit_info["fail_count"],
         "half_open_count": circuit_info["half_open_count"],
+        "auto_managed": bool(ch.auto_managed),
+        "cpa_instance_id": ch.cpa_instance_id,
+        "cpa_provider": ch.cpa_provider or "",
         "created_at": ch.created_at.isoformat() if ch.created_at else "",
         "updated_at": ch.updated_at.isoformat() if ch.updated_at else "",
     })
 
 @admin_router.post("/channels")
 async def create_channel(data: ChannelCreate, db: AsyncSession = Depends(get_db)):
+    # CLIProxyAPI 渠道由托管实例自动生成，避免手工建出无法工作的渠道。
+    if data.provider == "cliproxyapi":
+        raise HTTPException(
+            status_code=400,
+            detail="CLIProxyAPI 渠道由托管实例自动生成，请在“账号管理”中添加实例",
+        )
     encrypted_key = key_encryption.encrypt(data.api_key)
     api_type = _validate_channel_api_type(data.api_type, data.provider)
     health_check_model = data.health_check_model or (data.upstream_models[0] if data.health_check_mode == "prompt" and data.upstream_models else "")
@@ -549,6 +566,11 @@ async def update_channel(channel_id: str, data: ChannelUpdate, db: AsyncSession 
     ch = result.scalar_one_or_none()
     if not ch:
         raise HTTPException(status_code=404, detail="Channel not found")
+    if ch.auto_managed:
+        raise HTTPException(
+            status_code=400,
+            detail="该渠道由 CLIProxyAPI 按账号类型自动托管，请改为在“账号管理”中调整该类型的账号",
+        )
 
     if data.name is not None:
         ch.name = data.name
@@ -692,6 +714,11 @@ async def delete_channel(channel_id: str, db: AsyncSession = Depends(get_db)):
     ch = result.scalar_one_or_none()
     if not ch:
         raise HTTPException(status_code=404, detail="Channel not found")
+    if ch.auto_managed:
+        raise HTTPException(
+            status_code=400,
+            detail="该渠道由 CLIProxyAPI 按账号类型自动托管，请改为在“账号管理”中移除该类型的账号",
+        )
 
     refs_result = await db.execute(
         select(ModelChannelRef).where(ModelChannelRef.channel_id == channel_id)

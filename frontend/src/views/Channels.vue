@@ -82,7 +82,8 @@
         <div>
           <h3 class="text-sm font-semibold">健康检测</h3>
           <p class="mt-1 text-xs text-muted-foreground">
-            Prompt 探测会向指定模型发送测试消息，成功响应即代表渠道可用。
+            Prompt 探测会向指定模型发送测试消息，成功响应即代表渠道可用。由 CLIProxyAPI
+            托管的渠道按账号类型拆分并走账号池探测：进程存活且该类型下仍有可用账号时才判定为健康。
           </p>
         </div>
         <UiField label="检测模式"
@@ -190,6 +191,7 @@ import UiInput from '@/components/ui/UiInput.vue'
 import UiTextarea from '@/components/ui/UiTextarea.vue'
 import UiCheckbox from '@/components/ui/UiCheckbox.vue'
 import { computed, defineComponent, ref, onMounted, h } from 'vue'
+import { useRouter } from 'vue-router'
 import {
   listChannels,
   createChannel,
@@ -221,6 +223,7 @@ const Help = defineComponent({
 
 const toast = useToast()
 const confirm = useConfirm()
+const router = useRouter()
 const channels = ref<any[]>([])
 const search = ref('')
 const healthFilter = ref('')
@@ -470,6 +473,11 @@ async function syncModels(id: string) {
   }
 }
 async function deleteItem(id: string) {
+  const target = channels.value.find((item) => item.id === id)
+  if (target?.auto_managed) {
+    toast.warning('该渠道由 CLIProxyAPI 按账号类型自动维护，请在账号管理中移除该类型的账号')
+    return
+  }
   const ok = await confirm({
     title: '确认删除',
     content: '确定删除该渠道吗？',
@@ -490,14 +498,27 @@ async function deleteItem(id: string) {
   }
 }
 
+const healthModeLabels: Record<string, string> = {
+  prompt: 'Prompt 探测',
+  model_list: '模型列表探测',
+  account_pool: '账号池探测',
+}
+
 const columns = [
   { title: '渠道', key: 'name', render: (row: any) => h('div', { class: 'table-cell-stack' }, [
-    h('strong', row.name),
+    h('strong', { class: 'channel-name' }, [
+      row.name,
+      row.auto_managed
+        ? h(UiBadge, { variant: 'info', class: 'managed-badge' }, { default: () => '托管' })
+        : null,
+    ]),
     h(ModelLabel, { provider: row.provider, label: resolveProviderIdentity(row.provider).label, class: 'secondary-text' }),
   ]) },
   { title: '连接地址', key: 'base_url', render: (row: any) => h('div', { class: 'table-cell-stack' }, [
     h('span', row.base_url),
-    h('span', { class: 'secondary-text' }, `${Object.keys(row.custom_headers || {}).length} 个自定义请求头`),
+    h('span', { class: 'secondary-text' }, row.auto_managed
+      ? `由托管实例自动维护${row.cpa_provider ? `（账号类型：${row.cpa_provider}）` : ''}`
+      : `${Object.keys(row.custom_headers || {}).length} 个自定义请求头`),
   ]) },
   { title: '接口类型', key: 'api_type', render: (row: any) => apiTypeLabel(row.api_type) },
   { title: '模型 / 权重', key: 'upstream_models', width: 110, render: (row: any) => h('div', { class: 'table-cell-stack' }, [
@@ -519,7 +540,7 @@ const columns = [
             ] || row.health_status,
         }
       ),
-      h('span', { class: 'secondary-text' }, row.health_check_mode === 'prompt' ? 'Prompt 探测' : '模型列表探测'),
+      h('span', { class: 'secondary-text' }, healthModeLabels[row.health_check_mode] || row.health_check_mode),
     ]),
   },
   {
@@ -549,39 +570,45 @@ const columns = [
     title: '操作',
     key: 'actions',
     render: (row: any) =>
-      h(UiDropdown, null, {
-        default: () => [
-          h(
-            UiDropdownItem,
-            {
-              icon: RefreshCw,
-              loading: syncingId.value === row.id,
-              onClick: () => syncModels(row.id),
-            },
-            { default: () => (syncingId.value === row.id ? '拉取中' : '拉取模型') }
-          ),
-          h(
-            UiDropdownItem,
-            { icon: TestTube, onClick: () => openTest(row) },
-            { default: () => '测试' }
-          ),
-          h(
-            UiDropdownItem,
-            { icon: Pencil, onClick: () => openEdit(row) },
-            { default: () => '编辑' }
-          ),
-          h(
-            UiDropdownItem,
-            {
-              icon: Trash2,
-              variant: 'danger',
-              loading: deletingId.value === row.id,
-              onClick: () => deleteItem(row.id),
-            },
-            { default: () => (deletingId.value === row.id ? '删除中' : '删除') }
-          ),
-        ],
-      }),
+      row.auto_managed
+        ? h(
+            UiButton,
+            { variant: 'link', onClick: () => router.push('/accounts') },
+            { default: () => '账号管理' }
+          )
+        : h(UiDropdown, null, {
+            default: () => [
+              h(
+                UiDropdownItem,
+                {
+                  icon: RefreshCw,
+                  loading: syncingId.value === row.id,
+                  onClick: () => syncModels(row.id),
+                },
+                { default: () => (syncingId.value === row.id ? '拉取中' : '拉取模型') }
+              ),
+              h(
+                UiDropdownItem,
+                { icon: TestTube, onClick: () => openTest(row) },
+                { default: () => '测试' }
+              ),
+              h(
+                UiDropdownItem,
+                { icon: Pencil, onClick: () => openEdit(row) },
+                { default: () => '编辑' }
+              ),
+              h(
+                UiDropdownItem,
+                {
+                  icon: Trash2,
+                  variant: 'danger',
+                  loading: deletingId.value === row.id,
+                  onClick: () => deleteItem(row.id),
+                },
+                { default: () => (deletingId.value === row.id ? '删除中' : '删除') }
+              ),
+            ],
+          }),
   },
 ]
 
@@ -593,3 +620,15 @@ const { beforeClose, closeEditor } = useUnsavedForm(
 
 onMounted(load)
 </script>
+
+<style scoped>
+.channel-name {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.375rem;
+  flex-wrap: wrap;
+}
+.managed-badge {
+  font-size: 0.6875rem;
+}
+</style>
