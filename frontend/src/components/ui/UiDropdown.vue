@@ -43,28 +43,38 @@ function positionMenu() {
     right: `${Math.max(8, innerWidth - bounds.right)}px`,
   }
 }
-watch(open, async (value) => {
-  if (!value) return
-  await nextTick()
-  positionMenu()
-  await nextTick()
-  menu.value?.querySelector<HTMLElement>('fluent-menu-item')?.focus({ preventScroll: true })
-})
 function outside(event: MouseEvent) {
   if (!event.composedPath().includes(trigger.value!) && !event.composedPath().includes(menu.value!))
     close()
 }
 function reposition() {
-  if (open.value) positionMenu()
+  positionMenu()
 }
-onMounted(() => {
+// 全局监听只在菜单展开期间存在：列表里每行都常驻 click/scroll/resize 监听，
+// 会让每次滚动和点击都遍历全部行（配置页有数十行），是页面卡顿的主要来源。
+function bindGlobal() {
   document.addEventListener('click', outside, true)
   window.addEventListener('resize', reposition)
   window.addEventListener('scroll', reposition, true)
-})
-onBeforeUnmount(() => {
+}
+function unbindGlobal() {
   document.removeEventListener('click', outside, true)
   window.removeEventListener('resize', reposition)
   window.removeEventListener('scroll', reposition, true)
+}
+watch(open, async (value) => {
+  if (!value) {
+    unbindGlobal()
+    return
+  }
+  bindGlobal()
+  await nextTick()
+  positionMenu()
+  await nextTick()
+  menu.value?.querySelector<HTMLElement>('fluent-menu-item')?.focus({ preventScroll: true })
 })
+onMounted(() => {
+  if (open.value) bindGlobal()
+})
+onBeforeUnmount(unbindGlobal)
 </script>

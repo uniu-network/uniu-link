@@ -34,11 +34,24 @@ api.interceptors.request.use((config) => {
     const nonce = generateNonce()
     const path = '/api/admin' + (config.url || '')
 
-    let bodyHash = CryptoJS.SHA256('').toString(CryptoJS.enc.Hex)
-    if (config.data) {
-      const bodyStr = typeof config.data === 'string' ? config.data : JSON.stringify(config.data)
-      bodyHash = CryptoJS.SHA256(bodyStr).toString(CryptoJS.enc.Hex)
+    // 签名必须与实际发出的字节一致，因此这里复刻 axios transformRequest 的序列化规则：
+    // undefined 表示不发送 body；null、对象、数字等走 JSON.stringify（null 会变成 'null'）；
+    // 字符串先尝试按 JSON 解析，能解析时原样（去空白）发送，否则再 JSON.stringify 一次。
+    const raw = config.data
+    let serialized = ''
+    if (raw !== undefined) {
+      if (typeof raw === 'string') {
+        try {
+          JSON.parse(raw)
+          serialized = raw.trim()
+        } catch {
+          serialized = JSON.stringify(raw)
+        }
+      } else {
+        serialized = JSON.stringify(raw) ?? ''
+      }
     }
+    const bodyHash = CryptoJS.SHA256(serialized).toString(CryptoJS.enc.Hex)
 
     const signature = computeHmacSignature(
       config.method?.toUpperCase() || 'GET',
