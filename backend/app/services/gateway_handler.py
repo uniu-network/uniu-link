@@ -33,6 +33,37 @@ from app.services.stream_transformer import StreamProtocolError, StreamState
 
 logger = get_logger(__name__)
 
+# First-block hold-back. The opening lifecycle frames of a stream carry no user
+# content of their own, so they are buffered until the upstream proves it will
+# produce real output. An empty turn can then still fail over to the next
+# channel instead of being committed downstream as a successful 200.
+#
+# The deadline bounds how long that protection may delay the first byte, and the
+# byte cap bounds memory. The deadline must stay well under the idle timeout of
+# any proxy or CDN in front of the gateway, otherwise holding the opening frames
+# would turn a slow model into a dropped connection.
+_STREAM_HOLDBACK_SECONDS = 6.0
+_STREAM_HOLDBACK_MAX_BYTES = 64 * 1024
+
+
+def _cancel_task(task: "asyncio.Task[Any] | None") -> None:
+    """Drop a pending upstream read without waiting on it.
+
+    The task is not awaited, so its exception is retrieved by a callback;
+    otherwise a cancelled or failed read would surface later as an unretrieved
+    task exception.
+    """
+    if task is None or task.done():
+        return
+    task.cancel()
+
+    def _consume(settled: "asyncio.Task[Any]") -> None:
+        if not settled.cancelled():
+            settled.exception()
+
+    task.add_done_callback(_consume)
+
+
 class ApiKeyLogContext(TypedDict):
     from_apikey: str
     from_apikey_name: str
@@ -819,6 +850,7 @@ async def stream_gateway_request(
             completed = False
             failed = False
             timeout = channel.timeout or settings.default_channel_timeout
+            reader: "asyncio.Task[Any] | None" = None
             async with request_permit(channel.circuit_key, timeout) as permit:
                 if permit is None:
                     continue
@@ -843,24 +875,77 @@ async def stream_gateway_request(
                                 raise UpstreamAPIError(upstream_status, create_error_body(
                                     upstream_status, extract_error_message(detail), api_type, detail,
                                 ))
-                            async for event in iter_sse_events(resp, url, trace_id, channel.name):
-                                provider_chunk = await adapter.convert_stream_chunk(event, upstream_api_type)
-                                if not provider_chunk:
-                                    continue
-                                _merge_token_usage(token_usage, extract_stream_token_usage(provider_chunk))
-                                converted = transform_stream_chunk(provider_chunk, upstream_api_type, api_type, state)
-                                if state.finished:
-                                    completed = True
-                                    status_code, error_message = 200, ""
-                                if converted:
+                            # Buffer the opening frames until the upstream proves it
+                            # will produce real output. Nothing reaches the client
+                            # meanwhile, so an empty turn stays eligible for failover.
+                            holdback: list[str] = []
+                            holdback_bytes = 0
+                            released = False
+                            deadline = time.monotonic() + _STREAM_HOLDBACK_SECONDS
+                            events = iter_sse_events(resp, url, trace_id, channel.name).__aiter__()
+                            reader = asyncio.ensure_future(events.__anext__())
+                            while True:
+                                flush_only = False
+                                if not released:
+                                    remaining = deadline - time.monotonic()
+                                    ready: Any = ()
+                                    if remaining > 0:
+                                        # asyncio.wait leaves a pending read untouched,
+                                        # so an expiring hold-back cannot cancel the
+                                        # upstream stream the way wait_for would.
+                                        ready, _ = await asyncio.wait({reader}, timeout=remaining)
+                                    if not ready:
+                                        # Hold expired: give up the failover option rather
+                                        # than leave a slow model with no bytes sent.
+                                        released = True
+                                        flush_only = True
+                                elif not reader.done():
+                                    await asyncio.wait({reader})
+
+                                pending_out: list[str] = []
+                                if flush_only:
+                                    pending_out = holdback
+                                    holdback, holdback_bytes = [], 0
+                                else:
+                                    try:
+                                        event = reader.result()
+                                    except StopAsyncIteration:
+                                        break
+                                    reader = asyncio.ensure_future(events.__anext__())
+                                    provider_chunk = await adapter.convert_stream_chunk(event, upstream_api_type)
+                                    if provider_chunk:
+                                        _merge_token_usage(token_usage, extract_stream_token_usage(provider_chunk))
+                                        converted = transform_stream_chunk(provider_chunk, upstream_api_type, api_type, state)
+                                        if state.finished:
+                                            completed = True
+                                            status_code, error_message = 200, ""
+                                        if converted:
+                                            holdback.append(converted)
+                                            holdback_bytes += len(converted)
+                                        # Release on usable output, on terminal, or on the deadline.
+                                        # Reasoning alone must NOT release: a reasoning-then-stop
+                                        # turn is the silent refusal this hold-back exists to catch,
+                                        # and committing its frames early is what makes failover
+                                        # impossible. Checking ``state.finished`` outside the
+                                        # ``converted`` branch keeps buffered frames from being
+                                        # dropped when a terminal yields no bytes of its own.
+                                        if (released or state.visible_output_seen or state.finished
+                                                or holdback_bytes >= _STREAM_HOLDBACK_MAX_BYTES):
+                                            pending_out = holdback
+                                            holdback, holdback_bytes = [], 0
+                                            released = True
+                                if pending_out:
                                     if settings.log_content and len(output_text) < _MAX_LOG_TEXT_LENGTH:
-                                        output_text += _extract_stream_output_text(converted)[:_MAX_LOG_TEXT_LENGTH - len(output_text)]
+                                        output_text += _extract_stream_output_text("".join(pending_out))[:_MAX_LOG_TEXT_LENGTH - len(output_text)]
                                     # Set before yielding: generator close/cancellation can
                                     # occur while suspended at this exact yield.
                                     data_sent = True
-                                    yield converted
+                                    for chunk in pending_out:
+                                        yield chunk
                                 if state.finished:
                                     break
+                            _cancel_task(reader)
+                            reader = None
                             if not completed:
                                 raise StreamProtocolError("Upstream stream ended before its terminal event")
                     return
@@ -876,6 +961,8 @@ async def stream_gateway_request(
                         return
                     logger.warning("Stream channel failed, trying next", extra={"trace_id": trace_id, "channel": channel.name})
                 finally:
+                    _cancel_task(reader)
+                    reader = None
                     for key in total_usage:
                         total_usage[key] += token_usage[key]
                     with anyio.CancelScope(shield=True):

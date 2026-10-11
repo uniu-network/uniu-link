@@ -122,8 +122,11 @@ class StreamTransformerTests(unittest.TestCase):
                         self.assertEqual(chunks[-1].usage.total_tokens, 18)
 
     def test_passthrough_keeps_claude_signature_exactly(self):
+        # Thinking text is non-empty because a thinking block with no text at
+        # all is an empty turn, which the gateway now rejects. Signature
+        # pass-through is what this case is about.
         frames = source_events("claude")[:1] + [
-            sse({"type": "content_block_start", "index": 0, "content_block": {"type": "thinking", "thinking": "", "signature": ""}}),
+            sse({"type": "content_block_start", "index": 0, "content_block": {"type": "thinking", "thinking": "reasoning text", "signature": ""}}),
             sse({"type": "content_block_delta", "index": 0, "delta": {"type": "signature_delta", "signature": "opaque-authentic-signature"}}),
             sse({"type": "content_block_stop", "index": 0}), sse({"type": "message_stop"}),
         ]
@@ -367,3 +370,185 @@ class ToolConversionTests(unittest.TestCase):
         self.assertTrue(result["content"][1]["signature"])
         self.assertEqual(result["content"][2:], body["content"][2:])
         self.assertEqual(json.dumps(body), original)
+
+
+class EmptyTerminalTests(unittest.TestCase):
+    """A terminal event must not close a turn that produced nothing usable.
+
+    Regression cover for the two shipped defects: a usage-only chunk with
+    ``choices: []`` (which the gateway itself requests via ``include_usage``)
+    used to mark the stream as answered, and a reasoning-only turn used to reach
+    clients as a completed response whose visible text was empty.
+    """
+
+    def feed_all(self, state, frames):
+        wire = ""
+        for frame in frames:
+            wire += state.feed(frame) or ""
+        return wire
+
+    def terminal_response(self, wire):
+        events = [sse_payload(frame) for frame in wire.strip().split("\n\n") if frame.strip()]
+        return next(e["response"] for e in reversed(events)
+                    if e and e.get("type") in ("response.completed", "response.incomplete"))
+
+    def test_usage_only_chat_stream_is_rejected(self):
+        state = StreamState("openai", "responses")
+        frames = [chat({"role": "assistant"}),
+                  chat(usage={"prompt_tokens": 11, "completion_tokens": 0, "total_tokens": 11})]
+        with self.assertRaises(StreamProtocolError) as caught:
+            self.feed_all(state, frames + ["data: [DONE]\n\n"])
+        self.assertEqual(caught.exception.status_code, 502)
+        self.assertFalse(state.finished)
+
+    def test_usage_only_passthrough_stream_is_rejected(self):
+        state = StreamState("openai", "openai")
+        frames = [chat({"role": "assistant"}),
+                  chat(usage={"prompt_tokens": 11, "completion_tokens": 0, "total_tokens": 11})]
+        with self.assertRaises(StreamProtocolError):
+            self.feed_all(state, frames + ["data: [DONE]\n\n"])
+
+    def test_reasoning_only_turn_is_rejected_for_responses(self):
+        state = StreamState("openai", "responses")
+        frames = [chat({"reasoning_content": "想过但没说"}),
+                  chat(finish="stop"), "data: [DONE]\n\n"]
+        with self.assertRaises(StreamProtocolError) as caught:
+            self.feed_all(state, frames)
+        self.assertEqual(caught.exception.status_code, 502)
+        self.assertFalse(state.finished)
+
+    def test_reasoning_only_turn_stays_valid_for_claude(self):
+        # Claude thinking is a first-class content block, so a thinking-only
+        # turn is still usable there and must not be rejected.
+        state = StreamState("openai", "claude")
+        wire = self.feed_all(state, [chat({"reasoning_content": "只思考"}),
+                                     chat(finish="stop"), "data: [DONE]\n\n"])
+        self.assertTrue(state.finished)
+        self.assertIn('"type": "thinking_delta"', wire)
+        self.assertIn('"type": "message_stop"', wire)
+
+    def test_truncated_reasoning_only_turn_is_kept(self):
+        # max_output_tokens is a legitimate terminal, not a silent refusal.
+        state = StreamState("openai", "responses")
+        wire = self.feed_all(state, [chat({"reasoning_content": "被截断"}),
+                                     chat(finish="length"), "data: [DONE]\n\n"])
+        self.assertTrue(state.finished)
+        response = self.terminal_response(wire)
+        self.assertEqual(response["status"], "incomplete")
+
+    def test_truncated_empty_passthrough_is_kept(self):
+        # A same-protocol stream skips the protocol readers, so the finish reason
+        # has to be observed from the raw frame; otherwise a truncated empty turn
+        # would be misread as a silent refusal.
+        state = StreamState("openai", "openai")
+        wire = self.feed_all(state, [chat({"role": "assistant"}), chat(finish="length"),
+                                     "data: [DONE]\n\n"])
+        self.assertTrue(state.finished)
+        self.assertIn('"finish_reason": "length"', wire)
+
+    def test_truncated_empty_claude_passthrough_is_kept(self):
+        frames = [sse({"type": "message_start", "message": {"id": "msg-1", "type": "message",
+                                                            "role": "assistant", "content": [],
+                                                            "model": "upstream", "stop_reason": None,
+                                                            "stop_sequence": None,
+                                                            "usage": {"input_tokens": 5, "output_tokens": 0}}}),
+                  sse({"type": "message_delta", "delta": {"stop_reason": "max_tokens", "stop_sequence": None},
+                       "usage": {"output_tokens": 0}}),
+                  sse({"type": "message_stop"})]
+        state = StreamState("claude", "claude")
+        self.feed_all(state, frames)
+        self.assertTrue(state.finished)
+
+    def test_completed_empty_claude_passthrough_is_rejected(self):
+        frames = [sse({"type": "message_start", "message": {"id": "msg-1", "type": "message",
+                                                            "role": "assistant", "content": [],
+                                                            "model": "upstream", "stop_reason": None,
+                                                            "stop_sequence": None,
+                                                            "usage": {"input_tokens": 5, "output_tokens": 0}}}),
+                  sse({"type": "message_delta", "delta": {"stop_reason": "end_turn", "stop_sequence": None},
+                       "usage": {"output_tokens": 0}}),
+                  sse({"type": "message_stop"})]
+        state = StreamState("claude", "claude")
+        with self.assertRaises(StreamProtocolError):
+            self.feed_all(state, frames)
+        self.assertFalse(state.finished)
+
+    def test_incomplete_responses_passthrough_is_kept(self):
+        frames = [sse({"type": "response.created", "response": {"id": "r", "model": "upstream"}}),
+                  sse({"type": "response.incomplete",
+                       "response": {"id": "r", "status": "incomplete",
+                                    "incomplete_details": {"reason": "max_output_tokens"},
+                                    "output": []}})]
+        state = StreamState("responses", "responses")
+        wire = self.feed_all(state, frames)
+        self.assertTrue(state.finished)
+        self.assertIn('"response.incomplete"', wire)
+
+    def test_completed_with_embedded_output_passthrough_is_kept(self):
+        # Upstreams that stream no deltas can deliver the whole output only on
+        # the terminal event; the frame passes through verbatim, so its items
+        # are visible content, not an empty turn.
+        frames = [sse({"type": "response.created", "response": {"id": "r", "model": "upstream"}}),
+                  sse({"type": "response.completed", "response": {
+                      "id": "r", "status": "completed", "error": None, "incomplete_details": None,
+                      "output": [{"id": "msg", "type": "message", "role": "assistant", "status": "completed",
+                                  "content": [{"type": "output_text", "text": "整段正文", "annotations": []}]}],
+                      "usage": {"input_tokens": 3, "output_tokens": 4, "total_tokens": 7}}})]
+        state = StreamState("responses", "responses")
+        wire = self.feed_all(state, frames)
+        self.assertTrue(state.finished)
+        self.assertIn("整段正文", wire)
+
+    def test_completed_with_embedded_reasoning_only_is_rejected(self):
+        # Embedded reasoning items do not count on the Responses target: the
+        # reasoning-only rejection must survive the embedded-output fix.
+        frames = [sse({"type": "response.created", "response": {"id": "r", "model": "upstream"}}),
+                  sse({"type": "response.completed", "response": {
+                      "id": "r", "status": "completed",
+                      "output": [{"id": "rs", "type": "reasoning", "status": "completed",
+                                  "summary": [{"type": "summary_text", "text": "只思考"}]}]}})]
+        state = StreamState("responses", "responses")
+        with self.assertRaises(StreamProtocolError) as caught:
+            self.feed_all(state, frames)
+        self.assertEqual(caught.exception.status_code, 502)
+        self.assertFalse(state.finished)
+
+    def test_completed_with_embedded_tool_call_is_kept(self):
+        frames = [sse({"type": "response.created", "response": {"id": "r", "model": "upstream"}}),
+                  sse({"type": "response.completed", "response": {
+                      "id": "r", "status": "completed",
+                      "output": [{"id": "fc", "type": "function_call", "status": "completed",
+                                  "call_id": "call-1", "name": "weather", "arguments": "{}"}]}})]
+        state = StreamState("responses", "responses")
+        wire = self.feed_all(state, frames)
+        self.assertTrue(state.finished)
+        self.assertIn('"function_call"', wire)
+
+    def test_content_turn_still_completes_with_message_item(self):
+        state = StreamState("openai", "responses")
+        wire = self.feed_all(state, [chat({"role": "assistant"}), chat({"content": "你好"}),
+                                     chat(finish="stop"),
+                                     chat(usage={"prompt_tokens": 11, "completion_tokens": 5, "total_tokens": 16}),
+                                     "data: [DONE]\n\n"])
+        self.assertTrue(state.finished)
+        response = self.terminal_response(wire)
+        self.assertEqual(response["status"], "completed")
+        self.assertEqual([item["type"] for item in response["output"]], ["message"])
+
+    def test_tool_only_turn_is_not_empty(self):
+        state = StreamState("openai", "responses")
+        wire = self.feed_all(state, [
+            chat({"tool_calls": [{"index": 0, "id": "call-1", "type": "function",
+                                  "function": {"name": "weather", "arguments": "{}"}}]}),
+            chat(finish="tool_calls"), "data: [DONE]\n\n"])
+        self.assertTrue(state.finished)
+        response = self.terminal_response(wire)
+        self.assertEqual([item["type"] for item in response["output"]], ["function_call"])
+
+    def test_reasoning_item_carries_status(self):
+        state = StreamState("openai", "responses")
+        wire = self.feed_all(state, [chat({"reasoning_content": "思考"}), chat({"content": "正文"}),
+                                     chat(finish="stop"), "data: [DONE]\n\n"])
+        response = self.terminal_response(wire)
+        reasoning = next(item for item in response["output"] if item["type"] == "reasoning")
+        self.assertEqual(reasoning["status"], "completed")

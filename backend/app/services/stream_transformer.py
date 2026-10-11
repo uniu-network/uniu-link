@@ -77,6 +77,12 @@ class StreamState:
         self.created = int(time.time())
         self.started = False
         self.seen_event = False
+        # ``visible_output_seen`` marks output the caller can act on: text, a
+        # tool call, or (on the Claude target) a thinking block. Reasoning on the
+        # chat and Responses targets does not count, because it leaves their
+        # visible text field empty. A terminal event that closes a turn without
+        # this flag is treated as a silent refusal rather than a success.
+        self.visible_output_seen = False
         self.finished = False
         self.reason: str | None = None
         self.sequence = 0
@@ -124,7 +130,7 @@ class StreamState:
             return {"id": block["id"], "type": "function_call", "call_id": block["call_id"],
                     "name": block["name"], "arguments": block["text"], "status": item_status}
         if block["kind"] == "thinking":
-            return {"id": block["id"], "type": "reasoning",
+            return {"id": block["id"], "type": "reasoning", "status": item_status,
                     "summary": [{"type": "summary_text", "text": block["text"]}]}
         return {"id": block["id"], "type": "message", "role": "assistant", "status": item_status,
                 "content": [{"type": "output_text", "text": block["text"], "annotations": []}]}
@@ -167,6 +173,9 @@ class StreamState:
         self.by_key[key] = block
         if kind == "tool":
             block["tool_index"] = sum(b["kind"] == "tool" for b in self.blocks) - 1
+            # A tool call is actionable output even when its arguments stream
+            # later or never arrive at all.
+            self._mark_output("tool")
         # Chat can interleave parallel tools. Buffer them for Claude, whose
         # content blocks must be emitted sequentially.
         if not deferred:
@@ -207,12 +216,24 @@ class StreamState:
                 content = {"type": "text", "text": ""}
             self._event("content_block_start", index=block["claude_index"], content_block=content)
 
+    def _mark_output(self, kind: str) -> None:
+        """Record that the turn produced something the caller can act on.
+
+        Claude thinking counts, because it is a first-class content block there.
+        Chat and Responses reasoning does not: their visible text field stays
+        empty, which is exactly what makes a reasoning-only turn read as "no
+        content" on those clients.
+        """
+        if kind != "thinking" or self.target == "claude":
+            self.visible_output_seen = True
+
     def _append(self, block: dict[str, Any], text: str) -> None:
         if not text:
             return
         if block["closed"]:
             raise StreamProtocolError("Upstream emitted a delta after its content block ended")
         kind = block["kind"]
+        self._mark_output(kind)
         if self.target == "responses" or block["deferred"]:
             block["text"] += text
         if self.target == "responses":
@@ -303,6 +324,127 @@ class StreamState:
             status = "incomplete" if reason in ("length", "content_filter") else "completed"
             self._event("response." + status, response=self._response(status))
 
+    # Finish reasons that legitimately close a turn with no visible text. The
+    # set covers both chat and Responses vocabularies.
+    _LEGIT_EMPTY_REASONS = frozenset({
+        "length", "max_tokens", "max_output_tokens",
+        "content_filter", "refusal",
+        "tool_calls", "function_call", "tool_use",
+    })
+
+    def _observe_frame_content(self, payload: dict[str, Any] | None, event_type: str) -> None:
+        """Track real output for same-protocol pass-through frames.
+
+        Cross-protocol readers already set the flags from parsed blocks; a
+        pass-through stream never reaches them, so the raw event is inspected
+        here. Lifecycle frames (``response.created`` / ``in_progress``, a
+        role-only or usage-only ``choices`` entry) deliberately do not count,
+        otherwise a stream that only ever emitted them would look valid.
+
+        The finish reason is recorded as well, because the readers that normally
+        do that are skipped on this path.
+        """
+        if not payload:
+            return
+        if self.target == "openai":
+            for choice in payload.get("choices") or []:
+                delta = choice.get("delta") or {}
+                if choice.get("finish_reason"):
+                    self.reason = choice["finish_reason"]
+                if delta.get("content"):
+                    self._mark_output("text")
+                for tool in delta.get("tool_calls") or []:
+                    fn = tool.get("function") or {}
+                    if tool.get("id") or fn.get("name"):
+                        self._mark_output("tool")
+            return
+        if self.target == "claude":
+            kind = payload.get("type")
+            if kind == "message_delta":
+                stop_reason = (payload.get("delta") or {}).get("stop_reason")
+                if stop_reason:
+                    self.reason = stop_reason
+            elif kind == "content_block_start":
+                content = payload.get("content_block") or {}
+                if content.get("type") == "tool_use":
+                    self._mark_output("tool")
+                elif content.get("text") or content.get("thinking"):
+                    self._mark_output("thinking" if content.get("type") == "thinking" else "text")
+            elif kind == "content_block_delta":
+                delta = payload.get("delta") or {}
+                if delta.get("text"):
+                    self._mark_output("text")
+                elif delta.get("partial_json"):
+                    self._mark_output("tool")
+                elif delta.get("thinking"):
+                    self._mark_output("thinking")
+            return
+        if event_type == "response.output_text.delta":
+            if payload.get("delta"):
+                self._mark_output("text")
+        elif event_type == "response.function_call_arguments.delta":
+            self._mark_output("tool")
+        elif event_type in ("response.content_part.added", "response.content_part.done"):
+            if (payload.get("part") or {}).get("text"):
+                self._mark_output("text")
+        elif event_type in ("response.output_item.added", "response.output_item.done"):
+            item = payload.get("item") or {}
+            item_type = item.get("type")
+            if item_type == "function_call":
+                self._mark_output("tool")
+            elif item_type == "message":
+                for part in item.get("content") or []:
+                    if isinstance(part, dict) and part.get("text"):
+                        self._mark_output("text")
+                        break
+        elif event_type in ("response.completed", "response.incomplete"):
+            # An upstream may stream no deltas and deliver the whole output
+            # only on the terminal event, which then passes through verbatim;
+            # those items are content the client can still read, so scan them
+            # like ``output_item.done``. Reasoning items stay excluded,
+            # keeping the reasoning-only rejection intact.
+            response = payload.get("response")
+            if isinstance(response, dict):
+                for item in response.get("output") or []:
+                    if not isinstance(item, dict):
+                        continue
+                    if item.get("type") == "function_call":
+                        self._mark_output("tool")
+                    elif item.get("type") == "message":
+                        for part in item.get("content") or []:
+                            if isinstance(part, dict) and part.get("text"):
+                                self._mark_output("text")
+                                break
+
+    def _is_empty_terminal(self, payload: dict[str, Any] | None, event_type: str) -> bool:
+        """Report a terminal event that closes a turn with nothing actionable.
+
+        Mirrors the silent-refusal guard other aggregators apply to
+        ``response.completed``, but the criterion is "no visible text and no
+        tool call" rather than "no usage": UniuLink forces
+        ``stream_options.include_usage``, so a usage-only chunk with
+        ``choices: []`` would otherwise mask an empty turn. Reasoning alone does
+        not count, except on the Claude target where thinking is a first-class
+        content block (see ``_mark_output``).
+        """
+        if self.visible_output_seen:
+            return False
+        if (self.reason or "").strip().lower() in self._LEGIT_EMPTY_REASONS:
+            return False
+        # A truncation is a legitimate terminal, not a silent refusal. Only
+        # completed terminals are judged, matching the other aggregators.
+        if self.source == "responses":
+            if event_type == "response.incomplete":
+                return False
+            response = payload.get("response") if payload else None
+            if isinstance(response, dict) and response.get("status") == "incomplete":
+                return False
+        if payload is not None:
+            error = payload.get("error") or (payload.get("response") or {}).get("error")
+            if error:
+                return False
+        return True
+
     def feed(self, frame: str) -> str | None:
         if self.finished:
             return None
@@ -331,9 +473,14 @@ class StreamState:
                 self.sequence = max(self.sequence, payload["sequence_number"] + 1)
             if payload and ("choices" in payload or event_type in ("message_start", "response.created", "response.completed", "response.incomplete")):
                 self.seen_event = True
+            self._observe_frame_content(payload, event_type)
             if terminal:
                 if not self.seen_event:
                     raise StreamProtocolError("Upstream stream ended without a response")
+                if self._is_empty_terminal(payload, event_type):
+                    raise StreamProtocolError(
+                        "Upstream returned an empty stream with no visible content", 502,
+                    )
                 self.finished = True
             if self.target == "claude" and payload:
                 return self._passthrough_claude(frame, payload)
@@ -352,6 +499,10 @@ class StreamState:
         if terminal:
             if not self.seen_event:
                 raise StreamProtocolError("Upstream stream ended without a response")
+            if self._is_empty_terminal(payload, event_type):
+                raise StreamProtocolError(
+                    "Upstream returned an empty stream with no visible content", 502,
+                )
             self._finish()
             self.finished = True
         return "".join(self._out) or None
