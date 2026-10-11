@@ -71,4 +71,19 @@ logging:
   log_body: false
   # 是否记录响应内容。生产环境谨慎开启。
   log_content: false
+
+cpa:
+  # 是否允许 UniuLink 托管 CLIProxyAPI：自动下载官方 Release 二进制并启动进程。
+  # 默认关闭；开启后会执行下载的二进制，请确认来源可信。
+  manage_enabled: false
+  # 受管实例的安装根目录。通常无需配置，留空即使用 backend/.uniulink。
+  install_dir: ''
+  # 下载二进制使用的 GitHub 仓库。
+  release_repo: router-for-me/CLIProxyAPI
+  # 下载基地址，可替换为镜像站。
+  download_base_url: https://github.com
+  # 启动实例后等待健康检查通过的最长秒数。
+  start_timeout: 20
+  # 是否自动安装 CLIProxyAPI 配额插件，用于在「账号管理」展示套餐、剩余额度与重置时间。
+  quota_plugin_enabled: true
 ```
