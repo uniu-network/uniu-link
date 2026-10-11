@@ -224,6 +224,9 @@ class ConfigManager:
         self._lock = threading.RLock()
         self._settings = _load_settings()
         self._yaml_path = YAML_CONFIG_PATH
+        # 需要重启才能生效的配置项：只落盘、不改动运行中的 Settings，
+        # 待下次重启（或 /config/reload）后生效。界面据此展示“待重启”标记。
+        self._pending: dict[str, Any] = {}
 
     @property
     def settings(self) -> Settings:
@@ -232,54 +235,119 @@ class ConfigManager:
     def reload(self) -> Settings:
         with self._lock:
             self._settings = _load_settings()
+            # 配置文件里的值此刻已成为“当前值”，待生效标记随之失效。
+            self._pending.clear()
         return self._settings
 
     def get(self, key: str) -> Any:
         return getattr(self._settings, key, None)
 
-    def update(self, key: str, value: Any) -> bool:
+    def effective_value(self, key: str) -> Any:
+        """返回界面应展示的值：待重启项展示已写入文件的待生效值。"""
+        with self._lock:
+            if key in self._pending:
+                return self._pending[key]
+        return getattr(self._settings, key, None)
+
+    def update(self, key: str, value: Any) -> dict[str, Any]:
+        """更新配置项。
+
+        热重载项立即生效并写入配置文件；需要重启的项只写入配置文件并记录为
+        待生效，避免界面显示已生效而实际仍在使用旧值。两者的落盘结果都会如实
+        返回，写入失败时抛出 ValueError，不伪装成功。
+        """
         if key not in CONFIG_META:
             raise KeyError(f"Unknown config key: {key}")
 
         _, _, hot_reloadable, _ = CONFIG_META[key]
-        if not hot_reloadable:
-            raise ValueError(f"'{key}' is not hot-reloadable, restart required")
-
         casted = _cast_value(key, value)
+
+        if not hot_reloadable:
+            persisted, persist_error = self._persist_to_yaml(key, casted)
+            if not persisted:
+                raise ValueError(f"'{key}' 需要重启才能生效，但无法写入配置文件：{persist_error}")
+            with self._lock:
+                # 写回与当前运行值相同的值时无需重启，不残留待生效标记。
+                if casted == getattr(self._settings, key, None):
+                    self._pending.pop(key, None)
+                else:
+                    self._pending[key] = casted
+            return {
+                "key": key,
+                "value": casted,
+                "hot_reloadable": False,
+                "restart_required": True,
+                "persisted": True,
+                "persist_error": "",
+            }
+
         with self._lock:
             setattr(self._settings, key, casted)
+            self._pending.pop(key, None)
 
-        self._try_persist_to_yaml(key, casted)
-        return True
+        persisted, persist_error = self._persist_to_yaml(key, casted)
+        return {
+            "key": key,
+            "value": casted,
+            "hot_reloadable": True,
+            "restart_required": False,
+            "persisted": persisted,
+            "persist_error": persist_error,
+        }
 
-    def _try_persist_to_yaml(self, key: str, value: Any) -> None:
+    def _persist_to_yaml(self, key: str, value: Any) -> tuple[bool, str]:
+        """把单个配置项写回 config.yaml，返回 (是否成功, 失败原因)。"""
+        section = next(
+            (sec for sec, keys in YAML_SECTION_MAP.items() if key in keys), None
+        )
+        if section is None:
+            return False, f"'{key}' 未映射到配置文件的任何节点"
+
+        if not self._yaml_path.exists():
+            return False, f"未找到配置文件 {self._yaml_path}"
+
         try:
-            if not self._yaml_path.exists():
-                return
             with open(self._yaml_path) as f:
                 data = yaml.safe_load(f) or {}
+            if not isinstance(data, dict):
+                return False, f"{self._yaml_path} 的顶层结构不是映射"
+            section_data = data.get(section)
+            if not isinstance(section_data, dict):
+                section_data = {}
+                data[section] = section_data
 
-            section = None
-            for sec, keys in YAML_SECTION_MAP.items():
-                if key in keys:
-                    section = sec
-                    break
+            # _load_from_yaml 里短别名会覆盖同名规范字段，因此若该节点已经在用别名，
+            # 必须写别名；否则写规范名会在重启后被别名盖掉，改动看似保存却不生效。
+            yaml_key = next(
+                (
+                    alias
+                    for alias, canonical in YAML_KEY_ALIASES.get(section, {}).items()
+                    if canonical == key and alias in section_data
+                ),
+                key,
+            )
+            section_data[yaml_key] = value
+            # 别名与规范名同时存在时以别名生效，清掉会被忽略的重复项避免误导。
+            if yaml_key != key and key in section_data:
+                section_data.pop(key)
 
-            if section:
-                if section not in data:
-                    data[section] = {}
-                data[section][key] = value
-
-                with open(self._yaml_path, "w") as f:
-                    yaml.safe_dump(data, f, default_flow_style=False, allow_unicode=True)
-        except Exception:
-            pass
+            # 保持原文件权限，就地写入（绑定挂载的单文件无法用 os.replace 替换）。
+            with open(self._yaml_path, "w") as f:
+                yaml.safe_dump(data, f, default_flow_style=False, allow_unicode=True)
+        except yaml.YAMLError as exc:
+            return False, f"{self._yaml_path} 不是合法的 YAML：{exc}"
+        except OSError as exc:
+            return False, f"写入 {self._yaml_path} 失败：{exc}"
+        return True, ""
 
     def to_dict(self, mask_sensitive: bool = True) -> dict[str, Any]:
         result: dict[str, Any] = {}
+        with self._lock:
+            pending = dict(self._pending)
         for key in CONFIG_META:
             _, default, hot_reloadable, description = CONFIG_META[key]
-            value = getattr(self._settings, key, default)
+            is_pending = key in pending
+            value = pending[key] if is_pending else getattr(self._settings, key, default)
             if mask_sensitive and key in SENSITIVE_KEYS and value:
                 value = mask_value(str(value))
             result[key] = {
@@ -289,6 +357,7 @@ class ConfigManager:
                 "hot_reloadable": hot_reloadable,
                 "description": description,
                 "sensitive": key in SENSITIVE_KEYS,
+                "pending_restart": is_pending,
             }
         return result
 

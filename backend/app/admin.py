@@ -1154,14 +1154,26 @@ async def update_config(key: str, data: ConfigUpdateRequest):
     if key not in CONFIG_META:
         raise HTTPException(status_code=404, detail=f"Unknown config key: {key}")
     try:
-        config_manager.update(key, data.value)
-        return success_response(detail_result={
-            "key": key,
-            "value": getattr(config_manager.settings, key),
-            "message": f"'{key}' updated successfully",
-        })
+        result = config_manager.update(key, data.value)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
+
+    restart_required = result["restart_required"]
+    if restart_required:
+        message = f"'{key}' 已写入配置文件，重启后生效"
+    elif result["persisted"]:
+        message = f"'{key}' 已更新"
+    else:
+        message = f"'{key}' 已生效，但未能写入配置文件：{result['persist_error']}"
+
+    return success_response(detail_result={
+        "key": key,
+        "value": config_manager.effective_value(key),
+        "restart_required": restart_required,
+        "persisted": result["persisted"],
+        "persist_error": result["persist_error"],
+        "message": message,
+    })
 
 
 @admin_router.post("/config/reload")
